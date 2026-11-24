@@ -1,0 +1,35 @@
+DSD브릿지 (dsd-bridge) 이용 허락 조건
+
+Copyright (c) 2026 KimRaccoon-CPA. All rights reserved.
+
+1. 허락하는 것
+   누구나 이 소프트웨어를 Claude Code 플러그인으로 설치해 본인의 업무에 그대로 사용할 수 있습니다.
+   사용에 필요한 범위에서 설치·실행하기 위해 복제하는 것도 허락합니다.
+
+2. 미리 허락을 받아야 하는 것
+   다음은 저작권자(KimRaccoon-CPA)의 사전 서면 허락 없이 할 수 없습니다.
+   - 소스 코드·스킬·문서를 고치거나, 이를 바탕으로 다른 프로그램을 만드는 것(2차적 저작물 작성)
+   - 원본 또는 고친 판을 다른 사람에게 다시 배포·게시·공유하는 것(이 저장소 링크를 알려 주는 것은 괜찮습니다)
+   - 판매·대여하거나 유료 서비스에 넣는 것
+   고쳐 쓰고 싶은 점이 있으면 이 저장소의 GitHub 이슈(Issues)로 요청해 주세요.
+
+3. 보증 없음
+   이 소프트웨어는 있는 그대로 제공되며 어떠한 보증도 하지 않습니다. 결과 파일(.dsd·엑셀)은 반드시
+   DART 편집기 검사와 사용자의 검토를 거쳐 사용하십시오. 이 소프트웨어는 회계·감사 판단을 대신하지
+   않으며, 사용으로 생긴 손해에 대해 저작권자는 책임지지 않습니다.
+
+---
+
+DSD Bridge (dsd-bridge) License
+
+Copyright (c) 2026 KimRaccoon-CPA. All rights reserved.
+
+1. Permitted: Anyone may install this software as a Claude Code plugin and use it unmodified for their own
+   work, including copying it as needed to install and run it.
+2. Requires prior written permission from the copyright holder: modifying the source code, skills or
+   documents or creating derivative works; redistributing, publishing or sharing the original or modified
+   versions (sharing a link to this repository is fine); selling, renting or including it in paid services.
+   To request permission, open an issue in this repository.
+3. No warranty: The software is provided "as is" without warranty of any kind. Output files must be checked
+   in the DART editor and reviewed by the user. The software does not replace accounting or audit judgment,
+   and the copyright holder is not liable for any damages arising from its use.

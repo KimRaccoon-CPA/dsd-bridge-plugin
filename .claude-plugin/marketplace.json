@@ -1,0 +1,16 @@
+{
+  "name": "dsd-bridge",
+  "description": "DSD브릿지 배포처: DART 감사보고서 .dsd 를 정산표로 갱신하는 Claude Code 플러그인",
+  "owner": {
+    "name": "KimRaccoon-CPA"
+  },
+  "plugins": [
+    {
+      "name": "dsd-bridge",
+      "source": "./",
+      "description": "전기 감사보고서 .dsd 와 검토 완료 정산표로 당기 감사보고서 .dsd 를 만든다(사전재무제표·분반기 검토보고서 포함).",
+      "version": "0.2.1",
+      "category": "productivity"
+    }
+  ]
+}
