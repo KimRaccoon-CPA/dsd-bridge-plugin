@@ -25,7 +25,7 @@ META_NAME = "meta.xml"
 #: 출력 항목 순서 — 원본과 동일하게 고정한다 (§4.12, AC-20).
 ENTRY_ORDER = (CONTENTS_NAME, META_NAME)
 
-#: `<FILE-INFO ... size="184888" ...>` 의 **size 속성값만** 잡는다.
+#: `<FILE-INFO ... size="123456" ...>` 의 **size 속성값만** 잡는다.
 #: `date` 는 어떤 경우에도 건드리지 않는다 (AC-19).
 _FILE_INFO_SIZE = re.compile(rb'(<FILE-INFO\b[^>]*?\bsize=")([^"]*)(")')
 

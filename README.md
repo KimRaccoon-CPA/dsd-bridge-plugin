@@ -8,22 +8,53 @@
 - 마지막 검사(F9·파일형식 검사)와 등록·전송파일(DRT) 생성은 **사람이 DART 편집기에서** 합니다.
 
 ## 필요한 것
-- Windows PC, Claude Code(Claude 구독), DART 편집기(`C:\DART`)
+- Windows PC, Claude 유료 구독(Pro 이상), DART 편집기(`C:\DART`)
+- Claude Code 를 쓸 수 있는 곳 하나: **Claude 데스크톱 앱의 Code 탭** 또는 터미널의 Claude Code
 - 파이썬 3.13 이상(없으면 https://www.python.org/downloads/ 또는 `winget install Python.Python.3.13`)
 - 공개 저장소라 GitHub 계정 없이 설치할 수 있습니다
 
+> **일반 채팅 화면에서는 동작하지 않습니다.** DSD브릿지는 내 PC 의 파일을 열고 PC 에 설치된 파이썬으로 프로그램을 실행합니다. Claude 앱이라면 반드시 **Code 탭**에서, 환경은 **Local**(내 PC)로 쓰세요. Code 탭에서도 클라우드 환경을 고르면 PC 파일을 쓸 수 없습니다.
+
 ## 설치 (한 번)
-Claude Code 창에서 차례로 입력합니다.
+
+### Claude 데스크톱 앱을 쓰는 경우
+아래 둘 중 편한 방법 하나로 설치합니다.
+
+- **방법 1 (메뉴)**: 앱에서 **Customize → Plugins → Add → Add marketplace** 를 누르고 `KimRaccoon-CPA/dsd-bridge-plugin` 입력 → 목록에 나온 **dsd-bridge** 설치
+- **방법 2 (Code 탭 입력창)**: **Code** 탭 입력창에 아래 한 줄 입력
+  ```
+  /plugin install dsd-bridge --marketplace KimRaccoon-CPA/dsd-bridge-plugin
+  ```
+
+설치한 뒤에는 Code 탭에서 **+ New** 로 새 세션을 엽니다.
+
+### 터미널의 Claude Code 를 쓰는 경우
+Claude Code 창에서 차례로 입력한 뒤 Claude Code 를 다시 시작합니다.
 
 ```
 /plugin marketplace add KimRaccoon-CPA/dsd-bridge-plugin
 /plugin install dsd-bridge@dsd-bridge
 ```
 
-Claude Code 를 다시 시작한 뒤 "DSD브릿지 처음 설정해줘" 라고 하면 Claude 가 전용 파이썬(`%LOCALAPPDATA%\dsd-bridge\.venv`)을 만들고 동작을 확인합니다.
+> 앱과 터미널은 같은 PC 라면 설정을 함께 씁니다. 한쪽에 설치하면 다른 쪽에서도 보입니다.
+
+## 처음 설정 (한 번)
+1. (앱이라면) **Code** 탭 → 입력창 아래에서 **Local** 선택 → **Open folder…** 로 아무 작업 폴더나 엽니다
+2. "**DSD브릿지 처음 설정해줘**" 라고 입력합니다
+3. Claude 가 전용 파이썬(`%LOCALAPPDATA%\dsd-bridge\.venv`)을 만들고, `dsd-bridge 0.x.y` 버전이 나오는지 확인합니다. 명령 실행 허락 창이 뜨면 허용하세요
+
+### 처음 설정이 막힐 때
+| 증상 | 해결 |
+|---|---|
+| "python 을 찾을 수 없습니다" | 파이썬 3.13 이상을 설치합니다(위 '필요한 것'). 설치 때 **Add python.exe to PATH** 를 체크하고, 설치 후 Claude 를 다시 시작합니다 |
+| 설치 스크립트가 "이 시스템에서 스크립트를 실행할 수 없으므로…" 로 막힘(회사 PC 보안 설정) | 그대로 "설치 스크립트가 막혔어, 손으로 설치해줘" 라고 하면 Claude 가 스크립트 없이 전용 파이썬을 만듭니다 |
+| 부품 설치(pip) 중 인터넷·인증서 오류 | 회사망 보안 때문일 수 있습니다. 다른 네트워크에서 처음 설정만 하거나 회사 IT 에 pip 사용 가능 여부를 확인하세요 |
+| "XSD 검증: … 건너뜀" 또는 "XSD 폴더를 찾지 못했습니다" 라고 나옴 | DART 편집기가 `C:\DART` 에 없을 때입니다. DART 편집기를 설치하거나, 다른 곳에 있으면 그 위치를 Claude 에게 알려 주세요 |
+| 플러그인을 설치했는데 Claude 가 DSD브릿지를 모름 | Code 탭에서 **+ New** 로 새 세션을 열거나 앱·Claude Code 를 다시 시작합니다. "DSD브릿지" 라는 말을 넣어 요청해 보세요 |
 
 ## 쓰는 법
-예) "전기 감사보고서 `…제10기.dsd` 랑 검토 끝난 정산표 `…11기 정산표.xlsx` 로 11기 감사보고서 dsd 만들어줘"
+1. (앱이라면) **Code** 탭 → **Local** → **Open folder…** 로 그 고객의 기수 폴더를 엽니다
+2. 예) "전기 감사보고서 `…제10기.dsd` 랑 검토 끝난 정산표 `…11기 정산표.xlsx` 로 11기 감사보고서 dsd 만들어줘"
 
 Claude 가 펼치기 → 이월 → 정산표로 채우기 → 대사·합계 검증 → 되돌리기 → 후처리 순서로 진행하고, 대사 결과 엑셀과 작업 메모를 함께 남깁니다. 끝나면 DART 편집기에서 할 일을 알려 줍니다.
 
@@ -35,14 +66,16 @@ Claude 가 펼치기 → 이월 → 정산표로 채우기 → 대사·합계 �
 - 묻지 않고 항상 저장하려면 같은 파일에 `"memo": "auto"`
 
 ## 업데이트
-새 판이 나오면 Claude Code 에서:
+새 판이 나오면:
 
-```
-/plugin marketplace update dsd-bridge
-/plugin update dsd-bridge@dsd-bridge
-```
+- **앱(메뉴로 설치한 경우)**: Customize → Plugins 에서 dsd-bridge 를 업데이트합니다
+- **Code 탭 입력창 또는 터미널**:
+  ```
+  /plugin marketplace update dsd-bridge
+  /plugin update dsd-bridge@dsd-bridge
+  ```
 
-다시 시작하면 적용됩니다. 고객 메모와 전용 파이썬은 업데이트해도 그대로입니다.
+새 세션을 열거나 다시 시작하면 적용됩니다. 고객 메모와 전용 파이썬은 업데이트해도 그대로입니다.
 
 ## 주의
 - 고객 자료를 Claude 에 넣어도 되는지는 소속 회사 정책을 따르세요.

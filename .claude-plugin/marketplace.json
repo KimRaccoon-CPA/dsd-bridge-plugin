@@ -9,7 +9,7 @@
       "name": "dsd-bridge",
       "source": "./",
       "description": "전기 감사보고서 .dsd 와 검토 완료 정산표로 당기 감사보고서 .dsd 를 만든다(사전재무제표·분반기 검토보고서 포함).",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "category": "productivity"
     }
   ]
