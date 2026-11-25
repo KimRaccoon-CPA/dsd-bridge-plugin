@@ -11,6 +11,8 @@
   `--xref` 는 주석 ↔ 재무제표 상호대사(1.2 WP7)로, 참고용이라 종료 코드에 영향을 주지 않는다.
   `--settlement` 은 정산표 상호대사(1.3)로, 금액 불일치가 있으면 종료 코드 8 이다.
 - `dsd-bridge describe <입력.xlsx|입력.dsd> [--json 경로] [--sheet 이름]` — 구조 지도 (1.3).
+- `dsd-bridge template <틀.dsd> [--scrub -o 새틀.dsd [--replace 옛=새 …]] [--check 결과 [--old 문자열 …]]`
+  — 다른 회사 .dsd 를 틀로 쓸 때의 식별값 보기·비우기·잔존 검사 (0.5.0). 식별값 잔존이 있으면 종료 코드 8.
 - `dsd-bridge diff <전.xlsx> <후.xlsx> [--rollforward] [--json 경로] [-v]` — 통합문서 비교 (1.3).
 
 모든 `DsdBridgeError` 는 `message_ko` 를 표준 오류로 출력하고 그 `exit_code` 로 끝난다.
@@ -189,6 +191,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_describe.add_argument("--sheet", metavar="이름", help="이 시트만 출력합니다.")
     p_describe.set_defaults(func=cmd_describe)
 
+    p_template = sub.add_parser(
+        "template",
+        help="다른 회사 .dsd 를 틀로 쓸 때: 식별값 보기 / 숨은 식별값 비우기(--scrub) / 틀 잔존 검사(--check).",
+        description=(
+            "전기 .dsd 가 없어 다른 회사의 .dsd 를 틀로 쓸 때의 안전장치입니다.\n"
+            "  template 틀.dsd                      틀의 회사 이름·숨은 고유번호·요약값·날짜가 어디 있는지 봅니다.\n"
+            "  template 틀.dsd --scrub -o 새틀.dsd   숨은 식별값을 비운 새 틀을 만듭니다(--replace 옛=새 로 글자 치환).\n"
+            "  template 틀.dsd --check 결과.dsd      결과에 틀 회사 것이 남았는지 봅니다(식별값 잔존이 있으면 종료 코드 8)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_template.add_argument("input", metavar="틀.dsd", help="틀로 쓰는 다른 회사의 .dsd")
+    p_template.add_argument("--scrub", action="store_true",
+                            help="숨은 식별값(회사 이름·고유번호·법인등록번호·요약값)을 비운 새 틀을 -o 에 씁니다.")
+    p_template.add_argument("-o", "--output", metavar="새틀.dsd", help="--scrub 의 출력 경로")
+    p_template.add_argument("--replace", metavar="옛=새", action="append", default=[],
+                            help="--scrub 때 본문·표지 전체에서 글자를 바꿉니다(여러 번 가능). 예: --replace \"옛회사=새회사\"")
+    p_template.add_argument("--check", metavar="결과.dsd|작업.xlsx", dest="check_path",
+                            help="이 파일에 틀의 식별값·금액·글이 남았는지 검사합니다.")
+    p_template.add_argument("--old", metavar="문자열", action="append", default=[],
+                            help="--check 때 더 찾을 틀 회사의 문자열(대표이사 이름, 주소 등, 여러 번 가능)")
+    p_template.add_argument("--json", metavar="경로", dest="json_path", help="--check 결과를 JSON 으로 저장할 경로")
+    p_template.add_argument("-v", "--verbose", action="store_true", help="틀과 같은 일반 문단까지 모두 출력합니다.")
+    p_template.set_defaults(func=cmd_template)
+
     p_diff = sub.add_parser(
         "diff",
         help="통합문서 둘을 견줍니다 (같은 문서의 편집 전후, 또는 전기·당기 보고서).",
@@ -292,6 +319,36 @@ def cmd_check(args: argparse.Namespace) -> int:
     if settlement and args.report_path:
         print(f"안내: 상호대사 결과를 저장했습니다 — {args.report_path}")
     return report.exit_code
+
+
+def cmd_template(args: argparse.Namespace) -> int:
+    from dsd_bridge.errors import InputError
+    from dsd_bridge.template import check_against, identity, scrub
+
+    if args.scrub and args.check_path:
+        raise InputError("오류: --scrub 과 --check 는 따로 실행하세요.")
+    if args.scrub:
+        pairs = []
+        for item in args.replace:
+            old, sep, new = str(item).partition("=")
+            if not sep or not old:
+                raise InputError(f"오류: --replace 는 \"옛=새\" 형식이어야 합니다: {item}")
+            pairs.append((old, new))
+        for line in scrub(args.input, args.output, pairs).lines_ko():
+            print(line)
+        return 0
+    if args.replace or args.output:
+        raise InputError("오류: --replace 와 -o 는 --scrub 과 함께 씁니다.")
+    if args.check_path:
+        report = check_against(args.input, args.check_path, args.old)
+        if args.json_path:
+            report.write_json(args.json_path)
+        for line in report.lines_ko(verbose=args.verbose):
+            print(line)
+        return report.exit_code
+    for line in identity(args.input).lines_ko():
+        print(line)
+    return 0
 
 
 def cmd_describe(args: argparse.Namespace) -> int:
