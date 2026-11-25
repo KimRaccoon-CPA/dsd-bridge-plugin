@@ -30,5 +30,5 @@ echo "--- 스모크 테스트"
 echo
 echo "준비 완료. 이후 명령은 이 파이썬으로 실행하세요: $VPY"
 echo "예) $VPY dsd_bridge.py export '감사보고서.dsd' -o '감사보고서.xlsx'"
-[ -d tests ] && echo '픽스처(Client .dsd)가 있으면 DSD_BRIDGE_FIXTURE_DIR 로 지정한 뒤 python -m pytest -q 로 전체 테스트를 돌릴 수 있습니다.'
+[ -d tests ] && echo '픽스처(시험용 .dsd)가 있으면 DSD_BRIDGE_FIXTURE_DIR 로 지정한 뒤 python -m pytest -q 로 전체 테스트를 돌릴 수 있습니다.'
 exit 0
