@@ -37,6 +37,18 @@
 후보가 여럿이면 **재무제표 행 라벨**과 **주석 행 라벨 + 주석 제목**이 공유하는 글자 수로
 순위를 매기고, 같으면 문서에서 **먼저 나온 주석**을 고른다. 고른 것 말고 몇 개가 더 있었는지를
 `(후보 n)` 으로 남기므로, 금액이 여러 곳에 있어 애매하다는 사실이 숨지 않는다.
+
+주석 참조 대사 (0.6.0, "찾은주석")
+------------------------------------
+재무제표 과목에 `(주석4,7)` 처럼 주석 번호가 적혀 있으면, 후보 중 **그 주석에 있는 것**을 먼저 고르고
+결과를 셋으로 나눈다.
+
+- `참조 일치`: 금액이 적힌 주석 번호 안에서 나왔다
+- `다른 주석에 있음`: 적힌 주석에는 없고 다른 주석에서만 나왔다 (주석 번호가 밀렸거나 참조가 틀렸을 수 있음)
+- `참조 주석에 없음`: 주석 번호는 적혀 있는데 어느 주석에서도 금액을 못 찾았다
+
+`다른 주석에 있음` 은 `주석 참조 확인` 목록으로 따로 낸다(판정 기록 번호 대상). `참조 주석에 없음` 은
+주석이 합계 대신 내역만 적는 흔한 경우라 건수만 세고 `-v` 에서 보여 준다. 이것도 참고용이다.
 """
 
 from __future__ import annotations
@@ -54,6 +66,7 @@ from .check import (
     _nospace,
     parse_amount,
 )
+from .decisions import accepted_lines, item_id, split, tag
 from .model import note_heading
 from .text import DEFAULT_PATTERN, format_number
 
@@ -62,6 +75,24 @@ MATCHED = "대사"
 MISSING = "미대사"
 #: 요약에 세는 순서 (`ROUNDING` 은 합계검증과 같은 `단수차` 다).
 XREF_VERDICTS = (MATCHED, ROUNDING, MISSING)
+
+#: 주석 참조 대사 (0.6.0).
+REF_OK = "참조 일치"
+REF_OTHER = "다른 주석에 있음"
+REF_NONE = "참조 주석에 없음"
+#: `(주석4,7)` · `<주석 3>` · `(주3)` — 과목에 적힌 주석 번호.
+_RE_NOTE_REF = re.compile(r"[<(（]\s*주\s*석?\s*([\d,\s]+)[>)）]")
+
+
+def note_refs(label: str) -> tuple:
+    """과목에 적힌 주석 번호들 (`현금및현금성자산(주석3,14)` → `(3, 14)`)."""
+    out = []
+    for m in _RE_NOTE_REF.finditer(label or ""):
+        for tok in re.split(r"[,\s]+", m.group(1).strip()):
+            if tok.isdigit() and int(tok) not in out:
+                out.append(int(tok))
+    return tuple(out)
+
 
 #: 부호 관계.
 SIGN_SAME = "같은 부호"
@@ -299,6 +330,7 @@ class FsAmount:
     value: Decimal
     unit: str
     amount: Decimal         # 원 단위로 환산한 값
+    refs: tuple = ()        # 과목에 적힌 주석 번호 (0.6.0)
 
 
 def fs_amounts(tables, units) -> list:
@@ -311,6 +343,7 @@ def fs_amounts(tables, units) -> list:
         plan = _ce_plan(table)
         for row in table.rows:
             label = strip_numbering(row.label)
+            refs = note_refs(row.label)
             if plan is not None:
                 pairs = [(_ce_name(plan, c), row.vals.get(c)) for c in plan.cols]
             else:
@@ -319,7 +352,7 @@ def fs_amounts(tables, units) -> list:
                 if value is None or value == 0:
                     continue
                 out.append(FsAmount(table.sheet, table.eid, row.eid, label, row.acode,
-                                    period, value, unit, scale(value, unit)))
+                                    period, value, unit, scale(value, unit), refs))
     return out
 
 
@@ -335,8 +368,13 @@ def _shared(a: str, b: str) -> int:
 
 
 def _rank(fs: FsAmount, cands: list) -> list:
-    """후보를 라벨이 비슷한 순으로. 점수가 같으면 문서 순서(먼저 나온 주석)를 지킨다."""
-    return sorted(cands, key=lambda c: (-_shared(fs.label, c.label + c.title), c.seq))
+    """후보를 라벨이 비슷한 순으로. 점수가 같으면 문서 순서(먼저 나온 주석)를 지킨다.
+
+    0.6.0: 과목에 주석 번호가 적혀 있으면 그 주석의 후보를 맨 앞에 둔다.
+    """
+    refs = set(fs.refs)
+    return sorted(cands, key=lambda c: (0 if c.note in refs else 1,
+                                        -_shared(fs.label, c.label + c.title), c.seq))
 
 
 @dataclass(frozen=True)
@@ -350,6 +388,25 @@ class XrefItem:
     sign: str = ""
     diff: Decimal = Decimal(0)
     candidates: tuple = ()
+
+    @property
+    def ref_verdict(self) -> str:
+        """주석 참조 대사 (0.6.0). 과목에 주석 번호가 없으면 빈 문자열."""
+        if not self.fs.refs:
+            return ""
+        if self.match is None:
+            return REF_NONE
+        return REF_OK if self.match.note in self.fs.refs else REF_OTHER
+
+    @property
+    def key(self) -> str:
+        return item_id("xref-ref", self.fs.sheet, self.fs.label, self.fs.period)
+
+    def ref_line_ko(self) -> str:
+        refs = ",".join(str(n) for n in self.fs.refs)
+        found = (f"주석 {self.match.note}에서 발견({self.match.where_ko})" if self.match is not None
+                 else "어느 주석에서도 금액을 못 찾음")
+        return f"[주석 참조] {self.where_ko} — 적힌 주석 {refs} / {found} → {self.ref_verdict}"
 
     @property
     def where_ko(self) -> str:
@@ -399,6 +456,8 @@ class XrefItem:
             "others": self.others,
             "match": self.match.as_dict() if self.match is not None else None,
             "candidates": [c.as_dict() for c in self.candidates],
+            "refs": list(self.fs.refs),
+            "ref_verdict": self.ref_verdict,
         }
 
 
@@ -451,6 +510,22 @@ class XrefReport:
     fs_total: int = 0            # 재무제표 금액 수 (`--xref-min` 으로 거른 것 포함)
     note_cells: int = 0
     note_tables: int = 0
+    decisions: object = None     # 0.6.0 판정 기록
+
+    @property
+    def ref_issues(self) -> list:
+        """주석 참조 확인 대상 — 적힌 주석에는 없고 **다른 주석에서만** 나온 것.
+
+        `참조 주석에 없음` 은 주석이 합계 대신 내역만 적는 흔한 경우라 목록에 넣지 않는다(-v 로 본다).
+        """
+        return [it for it in self.items if it.ref_verdict == REF_OTHER]
+
+    def ref_counts(self) -> dict:
+        out = {REF_OK: 0, REF_OTHER: 0, REF_NONE: 0}
+        for it in self.items:
+            if it.ref_verdict:
+                out[it.ref_verdict] += 1
+        return out
 
     def counts(self) -> dict:
         out = {v: 0 for v in XREF_VERDICTS}
@@ -460,8 +535,13 @@ class XrefReport:
 
     def summary_ko(self) -> str:
         c = self.counts()
-        return (f"상호대사: {MATCHED} {c[MATCHED]} / {ROUNDING} {c[ROUNDING]} / "
+        line = (f"상호대사: {MATCHED} {c[MATCHED]} / {ROUNDING} {c[ROUNDING]} / "
                 f"{MISSING} {c[MISSING]}")
+        r = self.ref_counts()
+        if any(r.values()):
+            line += (f" | 주석 참조: {REF_OK} {r[REF_OK]} / {REF_OTHER} {r[REF_OTHER]} / "
+                     f"{REF_NONE} {r[REF_NONE]}")
+        return line
 
     def lines_ko(self, verbose: bool = False) -> list:
         lines = []
@@ -484,6 +564,14 @@ class XrefReport:
         if misses:
             lines.append(f"{MISSING} {len(misses)}건")
             lines.extend(it.line_ko() for it in misses)
+        if verbose:
+            lines.extend(it.ref_line_ko() for it in self.items if it.ref_verdict == REF_NONE)
+        keep, done = split(self.ref_issues, lambda it: it.key, self.decisions)
+        if keep:
+            lines.append(f"── 주석 참조 확인 {len(keep)}건 (과목에 적힌 주석 번호와 금액이 나온 주석 비교) ──")
+            lines.extend(it.ref_line_ko() + (tag(it.key) if self.decisions is not None else "")
+                         for it in keep)
+        lines.extend(accepted_lines(done, lambda it: it.key, lambda it: it.ref_line_ko(), self.decisions))
         if not self.fs_total:
             lines.append(NOTE_NO_FS)
         elif not self.note_cells:
@@ -519,6 +607,10 @@ __all__ = [
     "XREF_VERDICTS",
     "SIGN_SAME",
     "SIGN_OPPOSITE",
+    "REF_OK",
+    "REF_OTHER",
+    "REF_NONE",
+    "note_refs",
     "DEFAULT_UNIT",
     "UNIT_SCALES",
     "EXCLUDED_SECTION",

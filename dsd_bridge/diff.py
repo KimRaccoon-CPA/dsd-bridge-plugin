@@ -193,6 +193,12 @@ class SameTable:
     label: str
     cells: int
 
+    @property
+    def key(self) -> str:
+        from .decisions import item_id
+
+        return item_id("same-table", self.sheet, self.label)
+
     def line_ko(self) -> str:
         where = f"{self.sheet} {self.row}행" if self.row else f"{self.sheet} 표 {self.table}"
         return f"[{TABLE_SAME}] {where} — 첫 행 '{self.label[:24]}', 금액 칸 {self.cells}개가 전기 문서 그대로입니다"
@@ -211,6 +217,12 @@ class SameText:
     eid: str
     clues: tuple
     snippet: str
+
+    @property
+    def key(self) -> str:
+        from .decisions import item_id
+
+        return item_id("same-text", self.sheet, self.snippet[:40])
 
     def line_ko(self) -> str:
         where = f"{self.sheet} {self.row}행" if self.row else f"{self.sheet} {self.eid}"
@@ -239,6 +251,8 @@ class DiffReport:
     #: 짝을 짓지 못한 시트·표 `[(사유, 설명)]`.
     structure: list = field(default_factory=list)
     matched_rows: int = 0
+    #: 판정 기록 (0.6.0) — 전기와 같은 표·문단 중 확인 처리한 것.
+    decisions: object = None
 
     def carry_counts(self) -> dict:
         out = {CARRY_OK: 0, CARRY_BAD: 0, CARRY_EMPTY: 0}
@@ -263,9 +277,15 @@ class DiffReport:
                 f"이월: {CARRY_OK} {c[CARRY_OK]} / {CARRY_BAD} {c[CARRY_BAD]} / "
                 f"{CARRY_EMPTY} {c[CARRY_EMPTY]} / {PERIOD_STALE} {len(self.stale)}"
             )
-            if self.same_tables or self.same_texts:
-                out.append(f"확인 필요: {TABLE_SAME} {len(self.same_tables)} / "
-                           f"{TEXT_SAME} {len(self.same_texts)}")
+            from .decisions import split
+
+            st, dt = split(self.same_tables, lambda t: t.key, self.decisions)
+            sx, dx = split(self.same_texts, lambda t: t.key, self.decisions)
+            if st or sx or dt or dx:
+                line = f"확인 필요: {TABLE_SAME} {len(st)} / {TEXT_SAME} {len(sx)}"
+                if dt or dx:
+                    line += f" (확인 처리 {len(dt) + len(dx)})"
+                out.append(line)
         return out
 
     def lines_ko(self, verbose: bool = False) -> list:
@@ -303,16 +323,25 @@ class DiffReport:
                 lines.append(f"── {PERIOD_STALE} {len(self.stale)}건 ──")
                 lines.extend(p.line_ko() for p in self.stale)
                 lines.append("")
-            if self.same_tables:
-                lines.append(f"── {TABLE_SAME} {len(self.same_tables)}건 (갱신 누락 확인) ──")
-                lines.extend(t.line_ko() for t in self.same_tables)
+            from .decisions import accepted_lines, split, tag
+
+            tagged = self.decisions is not None
+            st, dt = split(self.same_tables, lambda t: t.key, self.decisions)
+            sx, dx = split(self.same_texts, lambda t: t.key, self.decisions)
+            if st:
+                lines.append(f"── {TABLE_SAME} {len(st)}건 (갱신 누락 확인) ──")
+                lines.extend(t.line_ko() + (tag(t.key) if tagged else "") for t in st)
                 lines.append("")
-            if self.same_texts:
-                lines.append(f"── {TEXT_SAME} {len(self.same_texts)}건 (금액·날짜 확인) ──")
-                shown = self.same_texts if verbose else self.same_texts[:TEXT_SHOW]
-                lines.extend(t.line_ko() for t in shown)
-                if len(shown) < len(self.same_texts):
-                    lines.append(f"… 그 밖 {len(self.same_texts) - len(shown)}건 (-v 로 전부 봅니다)")
+            if sx:
+                lines.append(f"── {TEXT_SAME} {len(sx)}건 (금액·날짜 확인) ──")
+                shown = sx if verbose else sx[:TEXT_SHOW]
+                lines.extend(t.line_ko() + (tag(t.key) if tagged else "") for t in shown)
+                if len(shown) < len(sx):
+                    lines.append(f"… 그 밖 {len(sx) - len(shown)}건 (-v 로 전부 봅니다)")
+                lines.append("")
+            done = accepted_lines(dt + dx, lambda t: t.key, lambda t: t.line_ko(), self.decisions)
+            if done:
+                lines.extend(done)
                 lines.append("")
             if verbose:
                 ok = [c for c in self.carries if c.verdict == CARRY_OK]
@@ -474,12 +503,13 @@ def _carry_check(old_table, new_table, old_row, new_row, report: DiffReport) -> 
         report.carries.append(item(CARRY_EMPTY, "당기가 전기 보고서의 당기와 같습니다"))
 
 
-def diff(old_path, new_path, *, rollforward: bool = False) -> DiffReport:
+def diff(old_path, new_path, *, rollforward: bool = False, decisions=None) -> DiffReport:
     """통합문서(또는 `.dsd`) 둘을 견준다."""
     old = load(old_path)
     new = load(new_path)
     same_doc = bool(old.contents_sha256) and old.contents_sha256 == new.contents_sha256
     report = DiffReport(old, new, MATCH_ID if same_doc else MATCH_LABEL, rollforward)
+    report.decisions = decisions
 
     n = min(len(old.sheets), len(new.sheets))
     if len(old.sheets) != len(new.sheets):

@@ -443,6 +443,13 @@ class CheckItem:
     structure: str
     note: str = ""            # `부호주의` 일 때 어느 하위를 차감으로 보면 맞는지
 
+    @property
+    def key(self) -> str:
+        """판정 기록 번호 (0.6.0) — 시트·과목·검사 구조·기간으로만 만든다(금액은 넣지 않는다)."""
+        from .decisions import item_id
+
+        return item_id("check", self.sheet, self.label, self.structure, self.period)
+
     def line_ko(self) -> str:
         line = (
             f"[{self.sheet}] {self.label} {self.period}: "
@@ -769,6 +776,15 @@ class CheckReport:
     settlement: object = None
     #: 확인 필요 문장 (0.4.0, `dsd_bridge.review`). 자동 판정이 아니며 종료 코드에 영향이 없다.
     review: list = field(default_factory=list)
+    #: 판정 기록 (0.6.0, `dsd_bridge.decisions`). 기록된 불일치는 종료 코드에 세지 않는다.
+    decisions: object = None
+
+    def _accepted(self, it) -> bool:
+        return self.decisions is not None and it.verdict != OK and self.decisions.accepted(it.key)
+
+    @property
+    def accepted(self) -> list:
+        return [it for it in self.items if self._accepted(it)]
 
     def counts(self) -> dict:
         out = {v: 0 for v in VERDICTS}
@@ -778,7 +794,7 @@ class CheckReport:
 
     @property
     def exit_code(self) -> int:
-        if self.counts()[MISMATCH]:
+        if any(it.verdict == MISMATCH and not self._accepted(it) for it in self.items):
             return MISMATCH_EXIT_CODE
         if self.settlement is not None and self.settlement.exit_code:
             return self.settlement.exit_code
@@ -801,6 +817,9 @@ class CheckReport:
         line = f"합계검증: OK {c[OK]} / 단수차 {c[ROUNDING]} / 불일치 {c[MISMATCH]}"
         if c[SIGN_NOTE]:
             line += f" / {SIGN_NOTE} {c[SIGN_NOTE]}"
+        done = self.accepted
+        if done:
+            line += f" (그중 확인 처리 {len(done)})"
         return line
 
     def lines_ko(self, verbose: bool = False) -> list:
@@ -817,13 +836,22 @@ class CheckReport:
             )
             for sheet, eid, why in self.excluded:
                 lines.append(f"안내: [{sheet}] 표 {eid} — {why}")
+        from .decisions import accepted_lines, item_id, tag
+
+        tagged = self.decisions is not None
         for it in self.items:
             if it.verdict == OK and not verbose:
+                continue
+            if self._accepted(it):
                 continue
             line = it.line_ko()
             if verbose:
                 line += f"  ({it.structure})"
+            if tagged and it.verdict != OK:
+                line += tag(it.key)
             lines.append(line)
+        lines.extend(accepted_lines(self.accepted, lambda it: it.key, lambda it: it.line_ko(),
+                                    self.decisions))
         note = self.note_ko()
         if note:
             lines.append(note)
@@ -835,9 +863,15 @@ class CheckReport:
             lines.append("")
             lines.extend(self.settlement.lines_ko(verbose))
         if self.review:
-            lines.append("")
-            lines.append(f"── 확인 필요 {len(self.review)}건 (자동 판정 아님) ──")
-            lines.extend(f"확인: {r}" for r in self.review)
+            def rkey(r):
+                return item_id("review", r)
+            keep = [r for r in self.review if not (tagged and self.decisions.accepted(rkey(r)))]
+            done = [r for r in self.review if r not in keep]
+            if keep:
+                lines.append("")
+                lines.append(f"── 확인 필요 {len(keep)}건 (자동 판정 아님) ──")
+                lines.extend(f"확인: {r}" + (tag(rkey(r)) if tagged else "") for r in keep)
+            lines.extend(accepted_lines(done, rkey, lambda r: r[:80], self.decisions))
         return lines
 
     def json_obj(self):
@@ -891,7 +925,7 @@ def check_tables(tables: list, path, tolerance: int = DEFAULT_TOLERANCE) -> Chec
 
 
 def check(path, tolerance: int = DEFAULT_TOLERANCE, *, xref: bool = False,
-          xref_min: int = 0) -> CheckReport:
+          xref_min: int = 0, decisions=None) -> CheckReport:
     """`.dsd` 또는 `.xlsx` 하나를 합계검증한다.
 
     `xref=True` 면 주석 ↔ 재무제표 **상호대사**(1.2 WP7)를 덧붙인다. 참고용이라 종료 코드에는
@@ -920,6 +954,7 @@ def check(path, tolerance: int = DEFAULT_TOLERANCE, *, xref: bool = False,
             f"오류: 합계검증은 .dsd 또는 .xlsx 만 받습니다: {p}"
         )
     report = check_tables(tables, p, tolerance)
+    report.decisions = decisions
     try:
         from .docmap import load as load_map
         from .review import review
@@ -931,6 +966,7 @@ def check(path, tolerance: int = DEFAULT_TOLERANCE, *, xref: bool = False,
         from .xref import build as build_xref
 
         report.xref = build_xref(tables, model, tolerance, xref_min)
+        report.xref.decisions = decisions
     return report
 
 

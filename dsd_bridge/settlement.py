@@ -472,6 +472,19 @@ class Result:
     ratio: float = 0.0
     caution: str = ""           # 0.4.0 판정은 그대로 두고 덧붙이는 주의 (사람이 볼 것)
 
+    @property
+    def key(self) -> str:
+        """판정 기록 번호 (0.6.0) — 구분·계정과목·판정 종류(일치인데 주의면 '주의')."""
+        from .decisions import item_id
+
+        return item_id("settle", self.rep.kind, self.rep.norm,
+                       self.verdict if self.verdict != MATCHED else "주의")
+
+    @property
+    def flagged(self) -> bool:
+        """사람이 볼 대상인가 — 일치·미대사가 아니거나 주의가 붙은 것."""
+        return self.verdict not in (MATCHED, UNRECONCILED) or bool(self.caution)
+
     def line_ko(self) -> str:
         amts = ", ".join(format_number(a, DEFAULT_PATTERN) for a in self.rep.amounts)
         line = f"[{self.rep.kind}] {self.rep.label} | 보고서 {amts} | {self.verdict}"
@@ -550,15 +563,34 @@ class SettlementReport:
     #: 0.4.0 정산표 파일 지문 (대사 뒤에 정산표가 바뀌었는지 견줄 수 있게).
     settlement_sha256: str = ""
     settlement_mtime: str = ""
+    #: 판정 기록 (0.6.0). 기록된 금액 불일치는 종료 코드에 세지 않는다.
+    decisions: object = None
+
+    def _done(self, key: str) -> bool:
+        return self.decisions is not None and self.decisions.accepted(key)
+
+    @staticmethod
+    def only_key(j) -> str:
+        from .decisions import item_id
+
+        return item_id("only", j.sheet, norm_label(j.label))
 
     @property
     def cautions(self) -> list:
-        return [r for r in self.results if r.caution]
+        return [r for r in self.results if r.caution and not self._done(r.key)]
 
     @property
     def only_inside(self) -> list:
         """대사 범위 안(짝지어진 행들 사이)에 낀 정산표 전용 행 — 보고서에 빠진 계정일 가능성이 높다."""
-        return [j for j, inside in self.only_settlement if inside]
+        return [j for j, inside in self.only_settlement if inside and not self._done(self.only_key(j))]
+
+    @property
+    def accepted(self) -> list:
+        """판정 기록으로 확인 처리된 `(설명, 번호)`."""
+        out = [(r.line_ko(), r.key) for r in self.results if r.flagged and self._done(r.key)]
+        out += [(f"[{ONLY_SETTLEMENT}] {j.sheet}!{j.row}행 {j.label[:40]}", self.only_key(j))
+                for j, _ in self.only_settlement if self._done(self.only_key(j))]
+        return out
 
     def counts(self, kinds=None) -> dict:
         out = {v: 0 for v in VERDICTS}
@@ -569,7 +601,8 @@ class SettlementReport:
 
     @property
     def exit_code(self) -> int:
-        return FOOTING_MISMATCH_EXIT if self.counts()[AMOUNT_MISMATCH] else 0
+        live = [r for r in self.results if r.verdict == AMOUNT_MISMATCH and not self._done(r.key)]
+        return FOOTING_MISMATCH_EXIT if live else 0
 
     def summary_ko(self) -> list:
         def line(name: str, kinds) -> str:
@@ -583,9 +616,12 @@ class SettlementReport:
         if self.cautions:
             extra.append(f"주의 {len(self.cautions)}")
         if self.only_settlement:
-            outside = len(self.only_settlement) - len(self.only_inside)
+            outside = sum(1 for _, inside in self.only_settlement if not inside)
             extra.append(f"{ONLY_SETTLEMENT} {len(self.only_inside)}"
                          + (f" (대사 범위 밖 {outside})" if outside else ""))
+        done = self.accepted
+        if done:
+            extra.append(f"확인 처리 {len(done)}")
         if extra:
             out.append("확인 필요: " + " / ".join(extra))
         return out
@@ -593,23 +629,32 @@ class SettlementReport:
     def lines_ko(self, verbose: bool = False) -> list:
         lines = [f"── 정산표 상호대사 ({self.settlement_path.name}) ──"]
         lines.extend(f"안내: {n}" for n in self.notes)
+        from .decisions import tag
+
+        tagged = self.decisions is not None
         for r in self.results:
             if r.verdict == MATCHED and not verbose and not r.caution:
                 continue
             if r.verdict == UNRECONCILED and not verbose:
                 continue
-            lines.append(r.line_ko())
+            if r.flagged and self._done(r.key):
+                continue
+            lines.append(r.line_ko() + (tag(r.key) if tagged and r.flagged else ""))
         inside = self.only_inside
         if inside:
             lines.append(f"── {ONLY_SETTLEMENT} {len(inside)}건 (보고서에 행이 빠졌는지 확인) ──")
             shown = inside if verbose else inside[:ONLY_SHOW]
             lines.extend(f"[{ONLY_SETTLEMENT}] {j.sheet}!{j.row}행 {j.label[:40]} | {j.amounts_ko()}"
-                         for j in shown)
+                         + (tag(self.only_key(j)) if tagged else "") for j in shown)
             if len(shown) < len(inside):
                 lines.append(f"… 그 밖 {len(inside) - len(shown)}건 (-v 또는 --report 로 전부 봅니다)")
         if verbose:
             lines.extend(f"[{ONLY_SETTLEMENT}·범위 밖] {j.sheet}!{j.row}행 {j.label[:40]} | {j.amounts_ko()}"
                          for j, ins in self.only_settlement if not ins)
+        done = self.accepted
+        if done:
+            lines.append(f"── 확인 처리 {len(done)}건 (판정 기록) ──")
+            lines.extend(f"[확인 처리] {what} — {self.decisions.reason_ko(k)}{tag(k)}" for what, k in done)
         lines.extend(self.summary_ko())
         return lines
 
@@ -891,10 +936,12 @@ def load_mapping(path) -> dict:
     return data
 
 
-def check_settlement(report_path, settlement_path, mapping_path=None) -> SettlementReport:
+def check_settlement(report_path, settlement_path, mapping_path=None, decisions=None) -> SettlementReport:
     """`.dsd`/`.xlsx` 보고서 하나를 정산표와 상호대사한다 (CLI 진입점)."""
     mapping = load_mapping(mapping_path) if mapping_path else None
-    return crosscheck(load(report_path), settlement_path, mapping)
+    report = crosscheck(load(report_path), settlement_path, mapping)
+    report.decisions = decisions
+    return report
 
 
 __all__ = [

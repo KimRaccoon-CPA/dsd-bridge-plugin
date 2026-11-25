@@ -42,8 +42,10 @@ from .gates import (
     gate_seq_duplicates,
 )
 from .mixededit import plan_mixed_edit
+from .recheck import Recheck, recheck
 from .model import CELL_TAGS, RO_SUFFIX, DocModel, project
-from .rowedit import RowPlan, clone_p_bytes, clone_tr_bytes, delete_span, insert_patch, plan_rows
+from .rowedit import (RowPlan, _section_sheet, clone_p_bytes, clone_tr_bytes, delete_span, insert_patch,
+                      plan_rows)
 from .sheetstate import FIRST_VALUE_COL, WorkbookState, load_workbook_state
 from .text import (
     canonical_out,
@@ -128,6 +130,7 @@ class ImportReport:
     meta_size_updated: bool = False
     bytes_before: int = 0
     bytes_after: int = 0
+    recheck: Recheck | None = None                        # 0.7.0 되돌린 결과 값 재확인
 
     @property
     def changed_cells(self) -> int:
@@ -167,6 +170,8 @@ class ImportReport:
             lines.append(n if n.startswith("안내") else f"안내: {n}")
         for w in self.warnings:
             lines.append(w if w.startswith("경고") else f"경고: {w}")
+        if self.recheck is not None:
+            lines.append(self.recheck.line_ko())
         lines.append(self.xsd_line_ko())
         return "\n".join(lines)
 
@@ -332,6 +337,9 @@ def import_(xlsx, dsd, out=None, *, force_hash: bool = False, allow_bulk_delete:
     report.bytes_after = len(result)
     log(f"[5/6] 정합성        well-formed OK / 요소 {after:,} = {len(index):,} + 삽입 {n_inserted:,} − 삭제 "
         f"{n_deleted:,} − 평탄화 {n_flattened:,} / 구조 동등성 OK")
+    # 0.7.0 값 재확인: 결과를 다시 펼쳐 엑셀 값과 칸마다 맞춰 본다 (경고만)
+    report.recheck = recheck(state, result, lambda e: _section_sheet(state, e))
+    report.warnings.extend(report.recheck.warnings_ko())
     schema = container.schema()
     report.xsd_original = xsd_validate(raw, schema, dart_root)
     report.xsd_result = (xsd_validate(result, schema, dart_root)

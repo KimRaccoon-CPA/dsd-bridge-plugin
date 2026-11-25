@@ -442,5 +442,98 @@ def check_against(template, result, old=()) -> TemplateCheck:
     return out
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# --blank (0.7.0)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+#: --blank 이 이름 자리에 넣는 표식 (review 의 자리표시 ○ 로 잡힌다)
+BLANK_NAME = "○회사명○"
+
+
+@dataclass
+class BlankReport:
+    source: Path
+    output: Path
+    amounts: int = 0
+    paragraphs: int = 0
+    names: int = 0
+    kept_mixed: list = field(default_factory=list)
+    scrubbed: list = field(default_factory=list)
+    xsd: str = ""
+
+    def lines_ko(self) -> list:
+        lines = [f"틀 비우기 완료: {self.source.name} → {self.output}",
+                 f"비운 금액 칸 {self.amounts}개 / 비운 주석 문단 {self.paragraphs}개(번호 제목 줄은 남김) / "
+                 f"이름을 {BLANK_NAME} 로 바꾼 곳 {self.names}곳",
+                 "비운 숨은 값: " + (", ".join(self.scrubbed) or "없음")]
+        if self.kept_mixed:
+            lines.append(f"안내: 서식 조각이 섞인 주석 문단 {len(self.kept_mixed)}개는 그대로 두었습니다(엑셀에서 글자만 "
+                         "고치면 됩니다): " + ", ".join(self.kept_mixed[:6]))
+        lines.append(f"XSD 검증: {self.xsd}")
+        lines.append("다음: 틀 모음 폴더(~/.dsd-bridge/templates/)에 보관해 두고, 쓸 때는 export 해 채운 뒤 "
+                     "`template <원래 파일> --check <결과>` 로 남은 이전 내용을 확인하세요.")
+        return lines
+
+
+def blank(path, out) -> BlankReport:
+    """구조만 남긴 빈 틀: 식별값을 비우고, 표 금액을 지우고, 주석 문단은 비우되 번호 제목 줄은 남기고, 이름은 ○회사명○ 로(자리표시로 잡히고, --scrub --replace "○회사명○=새 이름" 으로 바꾼다)."""
+    import tempfile
+
+    from .model import DocModel, note_heading
+    from .text import CR_TOKEN
+
+    src, dst = Path(path), Path(out) if out else None
+    if dst is None:
+        raise InputError("오류: --blank 에는 출력 경로(-o)가 필요합니다. 원본은 덮어쓰지 않습니다.")
+    if dst.resolve() == src.resolve():
+        raise OutputError("오류: 출력 경로가 원본과 같습니다. 다른 이름으로 지정하세요.")
+    ident = identity(src)
+    names = [n for n in {ident.company, ident.meta.get("regname", ""),
+                         _RE_CORP.sub("", ident.company or "").strip()} if n and len(n) >= 2]
+    with tempfile.TemporaryDirectory() as tmp:
+        mid = Path(tmp) / "scrubbed.dsd"
+        sr = scrub(src, mid, [(n, BLANK_NAME) for n in sorted(names, key=len, reverse=True)])
+        container, raw, index = _read(mid)
+    report = BlankReport(src, dst, names=sum(n for _, _, n in sr.replaced), scrubbed=sr.cleared)
+    model = DocModel.build(index, raw)
+    patches = PatchSet()
+    for section in model.sections:
+        in_notes = "주석" in section.sheet_name
+        for block in section.blocks:
+            if block.table is not None:
+                for r in block.table.rows:
+                    for c in r.cells:
+                        if c.numeric and not c.mixed:
+                            patches.add(set_text_patch(index, c.ordinal, b""))
+                            report.amounts += 1
+                continue
+            if not in_notes or block.kind != "P":
+                continue
+            parts = block.text.split(CR_TOKEN)
+            heading = note_heading(parts[0]) is not None
+            keep = parts[0] if heading else ""
+            if block.text == keep or not block.text.strip():
+                continue
+            if block.mixed:
+                report.kept_mixed.append(" ".join(block.text.replace(CR_TOKEN, " ").split())[:20])
+                continue
+            patches.add(set_text_patch(index, block.ordinal, escape_text(keep).encode("utf-8")))
+            report.paragraphs += 1
+    result = patches.apply(raw)
+    check_wellformed(result)
+    meta = container.meta_bytes
+    if len(result) != len(raw) and (meta_file_info_size(meta) or "") != "":
+        meta = update_meta_size(meta, len(result))
+    v = xsd_validate(result, container.schema())
+    report.xsd = v.status_ko + (f" ({v.reason})" if v.status != "pass" and v.reason else "")
+    try:
+        container.write(dst, contents=result, meta=meta)
+    except OSError as exc:
+        raise OutputError(f"오류: 출력 파일을 쓸 수 없습니다: {dst}\n  사유: {exc}") from exc
+    return report
+
+
 __all__ = ["Identity", "ScrubReport", "TemplateCheck", "identity", "scrub", "check_against",
-           "SCRUB_ITEMS", "MIN_AMOUNT"]
+           "SCRUB_ITEMS", "MIN_AMOUNT", "BlankReport", "blank", "BLANK_NAME"]

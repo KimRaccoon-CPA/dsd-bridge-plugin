@@ -35,6 +35,26 @@ def _where(sheet: str, row: int) -> str:
     return f"{sheet} {row}행" if row else sheet
 
 
+def note_duplicates(doc: DocMap) -> list:
+    """바로 앞 주석과 번호가 같은 제목 (주석을 복제한 뒤 번호를 안 고친 경우) `[번호]`."""
+    out = []
+    last = 0
+    for sheet in doc.sheets:
+        if not _is_note_sheet(sheet.name):
+            continue
+        for item in sheet.items:
+            if not isinstance(item, MapBlock):
+                continue
+            h = note_heading(item.text or "")
+            if h is None:
+                continue
+            if h[0] == last:
+                out.append(h[0])
+            elif h[0] > last:
+                last = h[0]
+    return out
+
+
 def note_numbers(doc: DocMap) -> list:
     """주석 번호 제목을 문서 순서로 — `dsd_bridge.model` 과 같은 규칙(첫 줄 `N. 제목`, 번호는 커져야 함)."""
     out = []
@@ -91,6 +111,7 @@ def review(doc: DocMap) -> list:
                 f"{len(numbers)}개)에 없습니다 — {shown}{more}. 주석 번호가 바뀌었으면 참조도 고치세요."
             )
         gaps = [f"{a} 다음이 {b}" for a, b in zip(numbers, numbers[1:]) if b != a + 1]
+        gaps += [f"{n} 이(가) 두 번" for n in note_duplicates(doc)]
         if gaps:
             out.append("주석 번호: 번호가 이어지지 않습니다 — " + ", ".join(gaps[:SHOW])
                        + ". 주석을 지우거나 끼웠으면 뒤 번호와 재무제표의 주석 참조를 함께 고치세요.")
@@ -148,4 +169,4 @@ def review(doc: DocMap) -> list:
     return out
 
 
-__all__ = ["review", "note_numbers", "note_refs"]
+__all__ = ["review", "note_numbers", "note_refs", "note_duplicates"]
