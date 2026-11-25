@@ -322,7 +322,7 @@ def _build_workbook(model: DocModel, container: DsdContainer, source: Path, *, m
         "dsdx_version": __version__,
         "workbook_format_version": WORKBOOK_FORMAT_VERSION,
         "created_at": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
-        # 0.3.0: 전체 경로(PC 사용자 이름·고객 폴더 이름)는 남기지 않는다. 어디에서도 읽지 않는 값이었고
+        # 0.3.0: 전체 경로(PC 사용자 이름·Client 폴더 이름)는 남기지 않는다. 어디에서도 읽지 않는 값이었고
         # 작업 엑셀이 밖으로 나가면 함께 새어 나간다. 옛 작업 엑셀의 `source_path` 는 import 가 무시한다.
         "source_name": source.name,
         "contents_sha256": container.contents_sha256(),

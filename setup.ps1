@@ -50,4 +50,4 @@ Write-Host ''
 Write-Host "준비 완료. 이후 명령은 이 파이썬으로 실행하세요: $vpy"
 Write-Host '예) .\dsd-bridge.cmd export "감사보고서.dsd" -o "감사보고서.xlsx"   (dsd-bridge.cmd 가 위 파이썬을 사용합니다)'
 Write-Host '팁: 이 폴더에 dsd-bridge.cmd 가 있으면  .\dsd-bridge.cmd export ...  처럼 짧게 쓸 수 있습니다.'
-if (Test-Path (Join-Path $root 'tests')) { Write-Host '픽스처(고객 .dsd)가 있으면 $env:DSD_BRIDGE_FIXTURE_DIR 로 지정한 뒤 python -m pytest -q 로 전체 테스트를 돌릴 수 있습니다.' }
+if (Test-Path (Join-Path $root 'tests')) { Write-Host '픽스처(Client .dsd)가 있으면 $env:DSD_BRIDGE_FIXTURE_DIR 로 지정한 뒤 python -m pytest -q 로 전체 테스트를 돌릴 수 있습니다.' }
