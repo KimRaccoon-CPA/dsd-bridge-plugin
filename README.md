@@ -11,7 +11,6 @@
 - Windows PC, Claude 유료 구독(Pro 이상), DART 편집기(`C:\DART`)
 - Claude Code 를 쓸 수 있는 곳 하나: **Claude 데스크톱 앱의 Code 탭** 또는 터미널의 Claude Code
 - 파이썬 3.13 이상(없으면 https://www.python.org/downloads/ 또는 `winget install Python.Python.3.13`)
-- 공개 저장소라 GitHub 계정 없이 설치할 수 있습니다
 
 > **일반 채팅 화면에서는 동작하지 않습니다.** DSD브릿지는 내 PC 의 파일을 열고 PC 에 설치된 파이썬으로 프로그램을 실행합니다. Claude 앱이라면 반드시 **Code 탭**에서, 환경은 **Local**(내 PC)로 쓰세요. Code 탭에서도 클라우드 환경을 고르면 PC 파일을 쓸 수 없습니다.
 
