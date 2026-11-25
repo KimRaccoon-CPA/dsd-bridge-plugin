@@ -1,7 +1,7 @@
-"""`dsd-bridge template` — 다른 회사의 `.dsd` 를 틀로 쓸 때의 안전장치 (0.5.0).
+"""`dsd-bridge template` — 전기 `.dsd` 가 없어 틀 문서로 시작할 때의 안전장치 (0.5.0).
 
-전기 `.dsd` 가 없으면 비슷한 다른 회사의 `.dsd` 를 틀로 삼아 새 회사 보고서를 만들 수 있다.
-이때 가장 큰 위험은 **틀 회사의 것이 남는 것**이다 — 회사 이름, 숨은 회사 고유번호, 법인등록번호,
+가장 안전한 틀은 DART 편집기 서식으로 만든 빈 문서다. 이전 내용이 들어 있는 `.dsd` 를 틀로 쓴다면
+가장 큰 위험은 **틀의 이전 내용이 결과에 남는 것**이다 — 이름, 숨은 회사 고유번호, 법인등록번호,
 요약값, 금액, 날짜, 주석 문장. 엑셀에 보이지 않는 곳(표지 머리말, 숨은 속성, `meta.xml`)에도 있다.
 
 세 가지 일을 한다.
@@ -13,7 +13,7 @@
    검사 때 다시 만드는 것과 같은 상태가 된다. `--replace` 는 본문·표지 전체에서 글자를 바꾼다
    (표지 머리말은 엑셀에 나타나지 않아 여기서만 바꿀 수 있다).
 3. `template 틀.dsd --check 결과.dsd|작업.xlsx [--old 문자열 …]` — 결과에 틀의 것이 남았는지 본다.
-   - **식별값 잔존**(종료 코드 8): 틀 회사 이름·고유번호·법인등록번호가 본문·표지·숨은 값·`meta.xml` 에 있다.
+   - **식별값 잔존**(종료 코드 8): 틀에 있던 이름·고유번호·법인등록번호가 본문·표지·숨은 값·`meta.xml` 에 있다.
    - **틀 금액 잔존**(확인 필요): 틀에 있던 5자리 이상 금액과 같은 금액이 결과의 표 칸에 있다.
      위치와 무관하게 값으로 견주므로 행을 옮겨도 잡힌다. 우연히 같은 금액일 수 있어 판정은 하지 않는다.
    - **틀 글 잔존**(확인 필요): 틀과 글자가 같은 문단. 금액·날짜가 든 것은 목록으로, 나머지는 건수만
@@ -36,10 +36,10 @@ from .text import DEFAULT_PATTERN, escape_text, format_number, unescape
 from .validate import check_wellformed, xsd_validate
 from .xmlsplice import PatchSet, SourceIndex, attr_value_patch, set_text_patch
 
-#: 틀 회사 것이라 비워야 하는 `EXTRACTION`/`meta.xml ITEM` 이름 — 법인등록번호, 주총일, 요약값, 사업연도.
+#: 틀의 이전 값이라 비워야 하는 `EXTRACTION`/`meta.xml ITEM` 이름 — 법인등록번호, 주총일, 요약값, 사업연도.
 SCRUB_ITEMS = ("CRP_RGS_NO", "GMSH_DATE", "TOT_ASSETS", "TOT_DEBTS", "TOT_SALES", "TOT_EMPL",
                "BSN_BGN_DT", "BSN_END_DT")
-#: 그대로 남으면 다른 회사로 읽히는 식별 항목.
+#: 그대로 남으면 이전 문서의 식별값으로 읽히는 항목.
 IDENTITY_ITEMS = ("CRP_RGS_NO",)
 #: 날짜 속성 (import 의 `DATE_AUNITS` 와 같다).
 DATE_AUNITS = frozenset({"PERIODFROM", "PERIODTO", "PERIODFROM2", "PERIODTO2",

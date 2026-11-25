@@ -1,6 +1,6 @@
 {
   "name": "dsd-bridge",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "DSD브릿지: 전기 감사보고서 .dsd(DART 편집기 파일)와 검토가 끝난 당기 정산표로 당기 감사보고서 .dsd 를 만든다. 엑셀로 펼쳐 정산표 숫자를 채우고, 정산표 대사·합계 검증 뒤 그대로 되돌린다.",
   "author": {
     "name": "KimRaccoon-CPA"

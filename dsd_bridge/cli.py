@@ -12,7 +12,7 @@
   `--settlement` 은 정산표 상호대사(1.3)로, 금액 불일치가 있으면 종료 코드 8 이다.
 - `dsd-bridge describe <입력.xlsx|입력.dsd> [--json 경로] [--sheet 이름]` — 구조 지도 (1.3).
 - `dsd-bridge template <틀.dsd> [--scrub -o 새틀.dsd [--replace 옛=새 …]] [--check 결과 [--old 문자열 …]]`
-  — 다른 회사 .dsd 를 틀로 쓸 때의 식별값 보기·비우기·잔존 검사 (0.5.0). 식별값 잔존이 있으면 종료 코드 8.
+  — 전기 .dsd 가 없어 틀 문서로 시작할 때 틀에 든 식별값 보기·비우기·남은 내용 검사 (0.5.0). 식별값 잔존이 있으면 종료 코드 8.
 - `dsd-bridge diff <전.xlsx> <후.xlsx> [--rollforward] [--json 경로] [-v]` — 통합문서 비교 (1.3).
 
 모든 `DsdBridgeError` 는 `message_ko` 를 표준 오류로 출력하고 그 `exit_code` 로 끝난다.
@@ -193,16 +193,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_template = sub.add_parser(
         "template",
-        help="다른 회사 .dsd 를 틀로 쓸 때: 식별값 보기 / 숨은 식별값 비우기(--scrub) / 틀 잔존 검사(--check).",
+        help="틀 문서로 시작할 때: 틀에 든 식별값 보기 / 숨은 식별값 비우기(--scrub) / 남은 내용 검사(--check).",
         description=(
-            "전기 .dsd 가 없어 다른 회사의 .dsd 를 틀로 쓸 때의 안전장치입니다.\n"
-            "  template 틀.dsd                      틀의 회사 이름·숨은 고유번호·요약값·날짜가 어디 있는지 봅니다.\n"
+            "전기 .dsd 가 없어 틀 문서로 시작할 때의 안전장치입니다. 가장 안전한 틀은 DART 편집기 서식으로 만든 빈 문서이고,\n"
+            "이전 내용이 들어 있는 틀이라면 그 내용이 결과에 남지 않았는지 반드시 검사합니다.\n"
+            "  template 틀.dsd                      틀에 든 이름·숨은 고유번호·요약값·날짜가 어디 있는지 봅니다.\n"
             "  template 틀.dsd --scrub -o 새틀.dsd   숨은 식별값을 비운 새 틀을 만듭니다(--replace 옛=새 로 글자 치환).\n"
-            "  template 틀.dsd --check 결과.dsd      결과에 틀 회사 것이 남았는지 봅니다(식별값 잔존이 있으면 종료 코드 8)."
+            "  template 틀.dsd --check 결과.dsd      결과에 틀의 이전 내용이 남았는지 봅니다(식별값 잔존이 있으면 종료 코드 8)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_template.add_argument("input", metavar="틀.dsd", help="틀로 쓰는 다른 회사의 .dsd")
+    p_template.add_argument("input", metavar="틀.dsd", help="틀로 쓰는 .dsd")
     p_template.add_argument("--scrub", action="store_true",
                             help="숨은 식별값(회사 이름·고유번호·법인등록번호·요약값)을 비운 새 틀을 -o 에 씁니다.")
     p_template.add_argument("-o", "--output", metavar="새틀.dsd", help="--scrub 의 출력 경로")
@@ -211,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_template.add_argument("--check", metavar="결과.dsd|작업.xlsx", dest="check_path",
                             help="이 파일에 틀의 식별값·금액·글이 남았는지 검사합니다.")
     p_template.add_argument("--old", metavar="문자열", action="append", default=[],
-                            help="--check 때 더 찾을 틀 회사의 문자열(대표이사 이름, 주소 등, 여러 번 가능)")
+                            help="--check 때 더 찾을 틀의 이전 문자열(대표이사 이름, 주소 등, 여러 번 가능)")
     p_template.add_argument("--json", metavar="경로", dest="json_path", help="--check 결과를 JSON 으로 저장할 경로")
     p_template.add_argument("-v", "--verbose", action="store_true", help="틀과 같은 일반 문단까지 모두 출력합니다.")
     p_template.set_defaults(func=cmd_template)
