@@ -471,6 +471,8 @@ class BlankReport:
         if self.kept_mixed:
             lines.append(f"안내: 서식 조각이 섞인 주석 문단 {len(self.kept_mixed)}개는 그대로 두었습니다(엑셀에서 글자만 "
                          "고치면 됩니다): " + ", ".join(self.kept_mixed[:6]))
+        lines.append("남긴 것: 표지·감사인의 감사보고서·외부감사 실시내용의 글(기수·날짜·감사인 이름·연락처 등)은 그대로입니다. "
+                     "기수·날짜는 기간 바꾸기 단계에서, 나머지는 `template --check` 의 '틀과 같은 글' 목록으로 고치세요.")
         lines.append(f"XSD 검증: {self.xsd}")
         lines.append("다음: 틀 모음 폴더(~/.dsd-bridge/templates/)에 보관해 두고, 쓸 때는 export 해 채운 뒤 "
                      "`template <원래 파일> --check <결과>` 로 남은 이전 내용을 확인하세요.")
@@ -482,7 +484,7 @@ def blank(path, out) -> BlankReport:
     import tempfile
 
     from .model import DocModel, note_heading
-    from .text import CR_TOKEN
+    from .text import CR_TOKEN, classify
 
     src, dst = Path(path), Path(out) if out else None
     if dst is None:
@@ -501,12 +503,15 @@ def blank(path, out) -> BlankReport:
     patches = PatchSet()
     for section in model.sections:
         in_notes = "주석" in section.sheet_name
+        # 외부감사 실시내용의 숫자 칸은 비우면 편집기 파일형식 검사가 "양수만 입력" 으로 막는다 → '-' (0.7.1)
+        empty = b"-" if "외부감사" in section.sheet_name.replace(" ", "") else b""
         for block in section.blocks:
             if block.table is not None:
                 for r in block.table.rows:
                     for c in r.cells:
-                        if c.numeric and not c.mixed:
-                            patches.add(set_text_patch(index, c.ordinal, b""))
+                        # 정렬용 공백이 붙은 금액(`12,864,156 `)도 금액으로 본다 (0.7.1)
+                        if not c.mixed and (c.numeric or classify(c.text.strip()).numeric):
+                            patches.add(set_text_patch(index, c.ordinal, empty))
                             report.amounts += 1
                 continue
             if not in_notes or block.kind != "P":

@@ -6,8 +6,19 @@
 
 - 머리말을 감싸는 `<DOCUMENT-HEADER>` 가 빠져 있다 → 다시 감싼다
 - 본문의 `<당기말>` 처럼 글자로 쓴 꺾쇠가 이스케이프되지 않았다 → `&lt;` 로 바꾼다 (같은 이유로 `&`)
-- 회사 이름·요약값은 비어 있다 (틀로는 오히려 알맞다)
-- 문단 안 줄바꿈(`&cr;`)이 지워져 있다 → **복원할 수 없다**. 표·계정코드·주석 구조는 그대로다
+- 목차를 감싸는 `<TOC>` 가 빠져 있다 → 목차 제목부터 첫 쪽나눔까지 다시 감싼다 (0.7.1)
+- 감사인의 감사보고서·재무제표 `LIBRARY` 를 감싸는 `<INSERTION>`(편집기 서식 연결 정보)과 LIBRARY 첫 자식
+  `<FILENAME ATYPE="dsl">01_재무상태표</FILENAME>`(어느 단위서식인지)이 빠져 있다 → LIBRARY 마다 편집기 서식의 값
+  (ABASISNUMBER·COMMENT·LIBRARYLIST·FILENAME)으로 되살린다 (0.7.1, 회사노트북 DART 편집기 5.1 시험):
+  · 한 INSERTION 에 여럿을 넣거나 연결 정보를 비우면 파일형식 검사가 "삽입된 단위서식이 지정된 개수보다 많습니다"
+  · 연결 정보는 채웠는데 FILENAME 이 없으면 파일형식 검사 때 편집기가 강제 종료된다(ucrtbase 0xc0000409)
+- 쓰지 않은 단위서식 자리표시(정오표, 재무상태표-각주, 신탁계정용, 부속명세서 목차, 내부회계관리제도 의견, 감사인의
+  중요성 금액 — `AFREQUENCY="0"` 인 빈 INSERTION)가 모두 지워져 있다 → 편집기 빈 서식과 같은 자리에 되살린다. 없으면
+  파일형식 검사가 "보고서에 문제가 발생했습니다(주석 문단)" 을 낸다 (0.7.1)
+- 금액 칸 끝에 정렬용 공백이 붙어 있다(`12,864,156 `) → 숫자로 읽히도록 공백을 뗀다 (0.7.1)
+- 회사 이름 글자·요약값은 비어 있다(회사 고유번호는 있어 편집기가 회사를 알아본다)
+- 문단 안 줄바꿈(`&cr;`)이 지워져 있다 → 대부분 **복원할 수 없다**. 주석 번호 제목 조각(`<SPAN>N. 제목</SPAN>`) 바로
+  뒤에 본문이 붙은 곳만 줄바꿈을 넣는다 (0.7.1). 표·계정코드·주석 구조는 그대로다
 
 입력은 접수번호(14자리, OpenDART 인증키 필요) 또는 내려받은 원문 `.xml`/`.zip` 이다.
 `--search 회사명` 은 그 회사의 최근 외부감사 관련 공시(접수번호)를 보여 준다.
@@ -110,41 +121,208 @@ def repair(raw: bytes) -> tuple:
             notes.append("빠진 머리말 묶음(DOCUMENT-HEADER)을 다시 감쌌습니다")
     if not text.lstrip().startswith("<?xml"):
         text = '<?xml version="1.0" encoding="utf-8"?>\r\n' + text
-    data, n_ins = _wrap_libraries(text.encode("utf-8"))
-    if n_ins:
-        notes.append(f"INSERTION 밖에 떨어진 LIBRARY 묶음 {n_ins}곳을 INSERTION 으로 감쌌습니다"
-                     "(편집기 서식 연결 정보 LIBRARYLIST 는 비어 있음)")
+    text, n_num = _RE_PADDED_AMOUNT.subn(r"\1\2\3", text)
+    if n_num:
+        notes.append(f"금액 칸 {n_num}곳 끝의 정렬용 공백을 떼어 숫자로 읽히게 했습니다")
+    text, n_head = _RE_HEADING_GLUED.subn(r"\1&amp;cr;", text)
+    if n_head:
+        notes.append(f"주석 번호 제목 바로 뒤에 붙은 본문 {n_head}곳에 줄바꿈을 넣었습니다")
+    data = text.encode("utf-8")
+    data, toc = _wrap_toc(data)
+    if toc:
+        notes.append("빠진 목차 묶음(TOC)을 다시 감쌌습니다")
+    code = (re.search(rb'<DOCUMENT-NAME\s+ACODE="(\d+)"', data) or [None, AUDIT_REPORT.encode()])[1].decode()
+    data, wrapped, unknown = _wrap_libraries(data, code)
+    if wrapped:
+        notes.append(f"INSERTION 밖에 떨어진 LIBRARY {wrapped}개를 편집기 서식 연결 정보(단위서식 이름 FILENAME 포함)로 하나씩 감쌌습니다"
+                     + (f"(그중 {unknown}개는 어떤 서식인지 몰라 연결 정보를 비워 둠)" if unknown else ""))
+    if code == AUDIT_REPORT:
+        data, n_ph = _add_placeholders(data, code)
+        if n_ph:
+            notes.append(f"지워져 있던 쓰지 않은 단위서식 자리표시 {n_ph}개(정오표·각주·신탁계정용 등)를 되살렸습니다")
     return data, notes
 
 
-def _wrap_libraries(xml: bytes) -> tuple:
-    """`INSERTION` 밖에 떨어진 `LIBRARY` 연속 묶음을 `INSERTION` 으로 감싼다 (편집기 파일에는 늘 감싸져 있다)."""
+#: 정렬용 공백이 붙은 금액 칸 (`<TE …>12,864,156 </TE>`, `- `). 전각 공백(빈 칸 표시)은 건드리지 않는다.
+_RE_PADDED_AMOUNT = re.compile(r"(<T[DE]\b[^>]*>) *(\(?-?\d{1,3}(?:,\d{3})*(?:\.\d+)?\)?|-) +(</T[DE]>)")
+#: 주석 번호 제목 조각 바로 뒤에 본문 글자가 붙은 곳 (`<P><SPAN …>4. 제목</SPAN>4-1 …`)
+_RE_HEADING_GLUED = re.compile(r"(<P\b[^>]*>\s*<SPAN\b[^>]*>\s*\d{1,2}\.\s*[^<]{1,80}</SPAN>)(?=[^<\s&])")
+#: 편집기 감사보고서 서식(00760, 편집기 5.1 서식 6.0)의 INSERTION·FILENAME 값.
+#: (판별, ABASISNUMBER, AFREQUENCY, COMMENT, LIBRARYLIST 꼴, FILENAME 후보 [(조건, 이름)]).
+#: 편집기로 만든 감사보고서 2개와 편집기 새 문서(빈 서식·재무상태표 삽입)에서 실측. `{code}` 는 문서코드.
+_FORM_INSERTIONS = (
+    ("title:독립된감사인의감사보고서", "E1", "1", "◆click◆ 『감사인의 감사보고서』 삽입",
+     "{code}#*감사인의 감사보고서.dsl", (("", "61_독립된 감사인의 감사보고서"),)),
+    ("title:외부감사인의감사보고서", "E1", "1", "◆click◆ 『감사인의 감사보고서』 삽입",
+     "{code}#*감사인의 감사보고서.dsl", (("", "62_외부감사인의 감사보고서"),)),
+    ("group:PBS", "E1", "1", "◆click◆『재무상태표』 삽입", "{code}_BS#*.dsl", (("", "01_재무상태표"),)),
+    ("group:PIS", "E1", "1", "◆click◆『손익계산서』 삽입", "{code}_IS#*.dsl",
+     (("title:포괄", "11_포괄손익계산서"), ("", "10_손익계산서"))),
+    ("group:PEF", "E1", "1", "◆click◆『자본변동표』 삽입", "{code}_PEF#*.dsl", (("", "20_자본변동표"),)),
+    ("group:PCF", "SE1", "1", "◆click◆『현금흐름표』 삽입", "{code}_CF#*.dsl",
+     (("group:PCF-D", "17_현금흐름표-직접법"), ("", "16_현금흐름표-간접법"))),
+    ("title:내부회계관리제도감사또는검토의견", "SE1", "1", "◆click◆ 『내부회계관리제도 감사 또는 검토의견』 삽입",
+     "{code}#*내부회계관리제도감사또는검토의견.dsl", (("", "50_내부회계관리제도감사또는검토의견"),)),
+    ("title:5.감사인의중요성금액", "SE1", "1", "◆click◆ 『감사인의 중요성 금액』 삽입",
+     "{code}#*감사인의중요성금액.dsl", (("", "70_감사인의중요성금액"),)),
+)
+
+#: 쓰지 않은 단위서식 자리표시 (편집기 5.1 감사보고서 빈 서식에서 실측). (자리, 기준, [(ABASISNUMBER, COMMENT, LIBRARYLIST)])
+#: 자리: before = 기준 요소 앞, after = 기준 INSERTION 뒤, after_section = 기준 INSERTION 이 든 SECTION-1 뒤,
+#: section_end = 기준 제목(AASSOCNOTE)이 든 SECTION-1 의 끝.
+_FORM_PLACEHOLDERS = (
+    ("before", "tag:COVER", (("SE1", "◆click◆ 정정문서 작성시 『정오표』 삽입", "일반-정정*.LCommon"),)),
+    ("after", "list:{code}_BS#*.dsl", (("SE1", "◆click◆『재무상태표-각주』 삽입", "{code}_NOTE#*.dsl"),
+                                      ("SE1", "◆click◆『재무상태표(신탁계정용)』 삽입", "{code}_BS-1#*.dsl"))),
+    ("after", "list:{code}_IS#*.dsl", (("SE1", "◆click◆『손익계산서(신탁계정용)』 삽입", "{code}_IS-1#*.dsl"),)),
+    ("after", "list:{code}_CF#*.dsl", (("SE1", "◆click◆『현금흐름표(신탁계정용)』 삽입", "{code}_CF-1#*.dsl"),)),
+    ("after_section", "list:{code}_BS#*.dsl",
+     (("SE1", "◆click◆ 『부속명세서 목차』 삽입", "{code}#*부속명세서_목차.dsl"),
+      ("SE1", "◆click◆ 『내부회계관리제도 감사 또는 검토의견』 삽입", "{code}#*내부회계관리제도감사또는검토의견.dsl"))),
+    ("section_end", "note:D-0-2-0-0", (("SE1", "◆click◆ 『감사인의 중요성 금액』 삽입", "{code}#*감사인의중요성금액.dsl"),)),
+)
+
+
+def _form_insertion(inner: bytes, code: str):
+    """LIBRARY 내용 → (ABASISNUMBER, AFREQUENCY, COMMENT, LIBRARYLIST, FILENAME) 또는 None(모르는 서식)."""
+    text = inner.decode("utf-8", "replace")
+    title = re.search(r"<TITLE[^>]*>(.*?)</TITLE>", text, re.S)
+    title = re.sub(r"\s+", "", title.group(1)) if title else ""
+    group = re.search(r'<TABLE-GROUP\s+ACLASS="([^"]+)"', text)
+    group = group.group(1) if group else ""
+
+    def hit(cond: str) -> bool:
+        if not cond:
+            return True
+        kind, val = cond.split(":", 1)
+        return (kind == "title" and val in title) or (kind == "group" and group.startswith(val))
+
+    for key, basis, freq, comment, lst, names in _FORM_INSERTIONS:
+        kind, val = key.split(":", 1)
+        if (kind == "title" and title == val) or (kind == "group" and group.startswith(val)):
+            filename = next(name for cond, name in names if hit(cond))
+            return basis, freq, comment, lst.format(code=code), filename
+    return None
+
+
+def _wrap_libraries(xml: bytes, code: str = AUDIT_REPORT) -> tuple:
+    """`INSERTION` 밖에 떨어진 `LIBRARY` 를 **하나씩** 편집기 서식 값의 `INSERTION` 으로 감싼다.
+
+    반환 `(바이트, 감싼 수, 서식을 몰라 값을 비운 수)`.
+    """
+    from .text import escape_text
     from .xmlsplice import SourceIndex
 
     index = SourceIndex.build(xml)
     spans = index.spans
-    groups = []
+    libs = [sp for sp in spans
+            if sp.tag == "LIBRARY" and sp.parent_ordinal >= 0 and spans[sp.parent_ordinal].tag != "INSERTION"]
+    out, unknown = xml, 0
+    for sp in reversed(libs):
+        lib = xml[sp.start_lt:sp.end_gt]
+        form = _form_insertion(lib, code)
+        if form is None:
+            unknown += 1
+            form = ("", "1", "", "", "")
+        basis, freq, comment, lst, filename = form
+        if filename and b"<FILENAME" not in lib[:200]:
+            cut = lib.index(b">") + 1
+            lib = (lib[:cut] + f'\r\n<FILENAME ATYPE="dsl">{escape_text(filename)}</FILENAME>'.encode("utf-8")
+                   + lib[cut:])
+        head = (f'<INSERTION ABASISNUMBER="{basis}" AFREQUENCY="{freq}" ADUPLICATION="N">\r\n'
+                f"<COMMENT>{escape_text(comment)}</COMMENT>\r\n<LIBRARYLIST>{escape_text(lst)}</LIBRARYLIST>\r\n")
+        out = out[:sp.start_lt] + head.encode("utf-8") + lib + b"\r\n</INSERTION>" + out[sp.end_gt:]
+    return out, len(libs), unknown
+
+
+def _add_placeholders(xml: bytes, code: str) -> tuple:
+    """편집기 빈 서식에 있는 쓰지 않은 단위서식 자리표시(AFREQUENCY="0")를 같은 자리에 되살린다. 반환 `(바이트, 넣은 수)`."""
+    from .text import escape_text
+    from .xmlsplice import SourceIndex
+
+    ix = SourceIndex.build(xml)
+    spans = ix.spans
+    lists = {}
     for sp in spans:
-        if sp.tag != "LIBRARY" or sp.parent_ordinal < 0 or spans[sp.parent_ordinal].tag == "INSERTION":
+        if sp.tag == "INSERTION":
+            m = re.search(rb"<LIBRARYLIST>(.*?)</LIBRARYLIST>", xml[sp.start_lt:sp.end_gt], re.S)
+            if m:
+                lists.setdefault(m.group(1).decode("utf-8", "replace"), sp)
+
+    def section_of(sp):
+        o = sp.parent_ordinal
+        while o >= 0 and spans[o].tag != "SECTION-1":
+            o = spans[o].parent_ordinal
+        return spans[o] if o >= 0 else None
+
+    edits = []
+    for where, key, items in _FORM_PLACEHOLDERS:
+        items = [(b, c, lst.format(code=code)) for b, c, lst in items]
+        items = [it for it in items if it[2] not in lists]
+        if not items:
             continue
-        parent = spans[sp.parent_ordinal]
-        siblings = parent.child_ordinals
-        k = siblings.index(sp.ordinal)
-        if groups and groups[-1][-1] == siblings[k - 1] if k else False:
-            groups[-1].append(sp.ordinal)
-        else:
-            groups.append([sp.ordinal])
-    out = xml
-    for g in reversed(groups):
-        start, end = spans[g[0]].start_lt, spans[g[-1]].end_gt
-        out = (out[:start] + b'<INSERTION ABASISNUMBER="" AFREQUENCY="1" ADUPLICATION="N">\r\n'
-               b"<COMMENT></COMMENT>\r\n<LIBRARYLIST></LIBRARYLIST>\r\n" + out[start:end]
-               + b"\r\n</INSERTION>" + out[end:])
-    return out, len(groups)
+        kind, val = key.split(":", 1)
+        val = val.format(code=code)
+        offset = None
+        if kind == "tag":
+            hit = next((sp for sp in spans if sp.tag == val), None)
+            offset = hit.start_lt if hit is not None and where == "before" else None
+        elif kind == "list" and val in lists:
+            anchor = lists[val]
+            if where == "after":
+                offset = anchor.end_gt
+            elif where == "after_section":
+                sec = section_of(anchor)
+                offset = sec.end_gt if sec is not None else None
+        elif kind == "note":
+            for sp in spans:
+                if sp.tag == "SECTION-1" and f'AASSOCNOTE="{val}"'.encode() in xml[sp.start_lt:sp.start_lt + 600]:
+                    offset = sp.end_lt
+                    break
+        if offset is None:
+            continue
+        body = "".join(f'\r\n<INSERTION ABASISNUMBER="{b}" AFREQUENCY="0" ADUPLICATION="N">\r\n'
+                       f"<COMMENT>{escape_text(c)}</COMMENT>\r\n<LIBRARYLIST>{escape_text(lst)}</LIBRARYLIST>\r\n"
+                       f"</INSERTION>\r\n" for b, c, lst in items)
+        edits.append((offset, body.encode("utf-8"), len(items)))
+    for offset, body, _ in sorted(edits, key=lambda e: e[0], reverse=True):
+        xml = xml[:offset] + body + xml[offset:]
+    return xml, sum(n for _, _, n in edits)
 
 
-#: 편집기 파일의 meta.xml 에 적힌 값 (서식 버전별 실측: dart4 = 편집기 5.036·문서 4.1, dart3 = 3.051·3.8).
-_EDITOR_VERSIONS = {"dart4.xsd": ("5.036", "4.1"), "dart3.xsd": ("3.051", "3.8")}
+def _wrap_toc(xml: bytes) -> tuple:
+    """본문 바로 아래의 목차 제목(`TITLE ATOC="N"`, 글자 '목차')부터 첫 쪽나눔까지를 `<TOC>` 로 감싼다."""
+    from .xmlsplice import SourceIndex
+
+    if b"<TOC" in xml:
+        return xml, False
+    index = SourceIndex.build(xml)
+    spans = index.spans
+    for sp in spans:
+        if sp.tag != "TITLE" or sp.parent_ordinal < 0 or spans[sp.parent_ordinal].tag != "BODY":
+            continue
+        seg = xml[sp.start_lt:sp.end_gt].decode("utf-8", "replace")
+        if 'ATOC="N"' not in seg[:seg.index(">")] or re.sub(r"\s+|<[^>]+>", "", seg) != "목차":
+            continue
+        sibs = spans[sp.parent_ordinal].child_ordinals
+        k = sibs.index(sp.ordinal)
+        last = None
+        for o in sibs[k + 1:]:
+            tag = spans[o].tag
+            if tag not in ("P", "TABLE", "TABLE-GROUP", "PGBRK"):
+                break
+            last = o
+            if tag == "PGBRK":
+                break
+        if last is None or spans[last].tag != "PGBRK":
+            return xml, False
+        start, end = sp.start_lt, spans[last].end_gt
+        return xml[:start] + b"<TOC>\r\n" + xml[start:end] + b"\r\n</TOC>" + xml[end:], True
+    return xml, False
+
+
+#: 편집기 파일의 meta.xml 에 적힌 값 (실측: dart4 = DART 편집기 5.1 이 다시 저장한 값 5.118·6.0, dart3 = 3.051·3.8).
+_EDITOR_VERSIONS = {"dart4.xsd": ("5.118", "6.0"), "dart3.xsd": ("3.051", "3.8")}
 
 
 def make_meta(xml: bytes) -> bytes:
@@ -190,10 +368,10 @@ class FromDartReport:
                                              if len(self.files) > 1 else "")]
         lines.extend(f"고침: {n}" for n in self.notes)
         lines.append(f"XSD 검증: {self.xsd}")
-        lines.append("안내: 공시 원문에는 문단 안 줄바꿈(&cr;)이 없어 복원되지 않습니다. 표·계정코드·주석 구조는 "
-                     "그대로이니 export 해 당기 내용으로 채우고, 문단은 새로 다듬으세요. 회사 이름·요약값은 비어 있어 "
-                     "DART 편집기에서 회사 지정·요약값 재추출이 필요합니다. 이렇게 만든 파일이 DART 편집기에서 열리는지는 "
-                     "아직 실제로 확인하지 않았으니, 처음 쓸 때 편집기로 열어 보고 열리면 편집기에서 저장한 파일을 틀로 쓰세요.")
+        lines.append("안내: 공시 원문에는 문단 안 줄바꿈(&cr;)이 없어 주석 번호 제목 뒤 말고는 복원되지 않습니다. 표·계정코드·"
+                     "주석 구조는 그대로이니 export 해 당기 내용으로 채우고, 붙어 있는 문단(예: '4-1 …' 소제목)은 줄을 나눠 "
+                     "다듬으세요. 요약값은 비어 있어 DART 편집기에서 재추출이 필요합니다. 편집기에서 한 번 열어 저장한 파일을 "
+                     "전기 .dsd 로 쓰고, 재무제표 검사(F9)의 '계정과목 오류'는 공시된 보고서에도 있던 비표준 계정이니 확인만 하세요.")
         return lines
 
 
