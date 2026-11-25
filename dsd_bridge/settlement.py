@@ -11,7 +11,8 @@
   전부 `FN` 이다.
 - 정산표 쪽: 기본 대응은 `DEFAULT_MAP` — BS·IS 는 이름에 `공시용`/`BS`/`IS` 가 든 시트,
   CE 는 `CE`, CF 는 `CF`, FN 은 `FN` 이다. 이름으로 못 찾으면 시트 **내용**에서
-  `재무상태표`/`손익계산서`/`자본변동표`/`현금흐름표` 제목을 찾아 보충한다.
+  `재무상태표`/`손익계산서`/`자본변동표`/`현금흐름표` 제목을 찾아 보충한다. `FN` 시트가 없으면
+  이름에 `주석` 이 들었거나 `1`·`19`·`5-1`·`주석3` 처럼 주석 번호만인 시트를 주석으로 본다(0.3.0).
   `--settlement-map` JSON 으로 덮어쓸 수 있다::
 
       {"BS": ["공시용", "BS"], "IS": ["공시용", "IS"], "CE": ["CE"], "CF": ["CF"],
@@ -234,8 +235,24 @@ def _sheet_kinds(ws) -> set:
     return found
 
 
-def load_settlement(path, mapping: dict | None = None) -> dict:
-    """정산표를 읽어 `{구분: [JsRow, …]}` 로. 시트 대응은 `mapping` (없으면 `DEFAULT_MAP`)."""
+#: 주석 번호만으로 된 정산표 시트 이름 — `1`, `19`, `5-1`, `주석3`, `주석 12`, `N3` (0.3.0).
+_RE_NOTE_SHEET = re.compile(r"^\s*(?:주석|N)?\s*\d{1,2}(?:\s*-\s*\d{1,2})?\s*$", re.IGNORECASE)
+
+
+def note_sheets(sheetnames) -> list:
+    """이름에 `FN` 이 든 시트가 없을 때 주석으로 볼 시트 — 이름에 `주석` 이 들었거나 주석 번호만인 시트.
+
+    정산표 주석 시트를 `1`~`19` 처럼 번호로만 이름 붙이는 경우가 많아(실무 사례) 기본 대응
+    `FN` 으로는 하나도 못 찾았다. 순서는 통합문서의 시트 순서 그대로다.
+    """
+    return [n for n in sheetnames if "주석" in n or _RE_NOTE_SHEET.match(n)]
+
+
+def load_settlement(path, mapping: dict | None = None, notes: list | None = None) -> dict:
+    """정산표를 읽어 `{구분: [JsRow, …]}` 로. 시트 대응은 `mapping` (없으면 `DEFAULT_MAP`).
+
+    `notes` 를 주면 자동으로 고른 시트 같은 안내 문장을 거기에 덧붙인다.
+    """
     from openpyxl import load_workbook
 
     p = Path(path)
@@ -274,6 +291,14 @@ def load_settlement(path, mapping: dict | None = None) -> dict:
                       if any(str(x).upper() in n.upper() for x in needles)]
             if not picked and kind in FS_TITLES.values():
                 picked = [n for n in wb.sheetnames if kind in _sheet_kinds(wb[n])]
+            if not picked and kind == FN and needles == DEFAULT_MAP[FN]:
+                picked = note_sheets(wb.sheetnames)
+                if picked and notes is not None:
+                    shown = ", ".join(picked[:8]) + (f" 외 {len(picked) - 8}개" if len(picked) > 8 else "")
+                    notes.append(
+                        f"정산표에 'FN' 시트가 없어 주석 시트로 보이는 {len(picked)}개({shown})를 주석으로 "
+                        "대사했습니다. 다르면 --settlement-map 의 \"FN\" 으로 지정하세요."
+                    )
             rows = []
             for n in picked:
                 rows.extend(rows_of(n))
@@ -523,8 +548,10 @@ class SettlementReport:
 
 def crosscheck(doc: DocMap, settlement_path, mapping: dict | None = None) -> SettlementReport:
     """구조 지도와 정산표를 상호대사한다."""
-    js = load_settlement(settlement_path, mapping)
+    picked_notes: list = []
+    js = load_settlement(settlement_path, mapping, notes=picked_notes)
     report = SettlementReport(doc.path, Path(settlement_path))
+    report.notes.extend(picked_notes)
     reps = report_rows(doc)
     for kind in sorted({r.kind for r in reps}):
         if not js.get(kind):
@@ -614,6 +641,7 @@ __all__ = [
     "amount_match",
     "read_settlement_sheet",
     "load_settlement",
+    "note_sheets",
     "report_rows",
     "crosscheck",
     "check_settlement",

@@ -7,7 +7,9 @@
          [--apply] [--only "시트!F5,시트!G36"] [--skip "주석!F120"]
   --n 옛당기기수 새당기기수, --old 옛당기시작 옛당기종료 옛전기시작 옛전기종료, --new 새당기시작 새당기종료 새전기시작 새전기종료
 표기 형식: 'YYYY년 MM월 DD일', 'YYYY년 M월 D일', 'YYYY.MM.DD', 'YYYY. MM. DD', 'YYYY-MM-DD', 'YYYY/MM/DD',
-          '제 N(당) 기', '제 N(당)기', '제N(당)기', '제 N 기'(당기만), 전기도 같은 형식.
+          '제 N (당) 기', '제 N(당) 기', '제 N(당)기', '제N(당)기', '제 N 기'(당기만), 전기도 같은 형식.
+회색 칸(서식 조각이 섞인 칸)도 바꿔도 된다. 0.3.0 부터 되돌릴 때 서식을 두고 글자만 반영하고, 표지·외부감사 실시내용의
+날짜 칸 글이 바뀌면 숨은 날짜 속성값(AUNITVALUE)도 같이 맞춘다.
 남는 것(사람 확인): 감사의견 문단의 'A와 B' 순서, 자본변동표 '당기초/전기말' 라벨, 감사보고서일(○ 자리표시), 외부감사 실시내용의 감사대상 사업연도.
 """
 import argparse, datetime, re, sys
@@ -29,7 +31,7 @@ def build_map(n_old, n_new, old, new):
             rep[a] = b
     po, pn = n_old - 1, n_new - 1
     for tag, a, b in (("당", n_old, n_new), ("전", po, pn)):
-        for pat in ("제 {}({}) 기", "제 {}({})기", "제{}({})기"):
+        for pat in ("제 {} ({}) 기", "제 {}({}) 기", "제 {}({})기", "제{}({})기"):
             rep[pat.format(a, tag)] = pat.format(b, tag)
     rep[f"제 {n_old} 기"] = f"제 {n_new} 기"
     return rep

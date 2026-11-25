@@ -79,10 +79,13 @@ def expected_signatures(orig_index: SourceIndex, plan) -> list:
     - 삽입(복제) 행 → 앵커(복제 원본) 서브트리의 서명을 삽입 위치 뒤에 한 번 더 (단계 6)
     """
     raw = orig_index.raw
-    sigs = [
+    base = [
         (sp.tag, orig_index.attr_bytes(sp.ordinal), orig_index.parent_path(sp.ordinal))
         for sp in orig_index.spans
     ]
+    # 0.3.0 — 속성값을 바꾼 요소(날짜 속성값)는 바뀐 속성으로 기대한다. 사본은 원본 속성에서 출발한다.
+    overrides = getattr(plan, "attr_overrides", None) or {}
+    sigs = [(t, overrides.get(i, a), p) for i, (t, a, p) in enumerate(base)]
     removed = set()
     for o in list(plan.deleted_ordinals()) + list(plan.planned_deletions):
         a, b = subtree_range(orig_index, o)
@@ -96,7 +99,8 @@ def expected_signatures(orig_index: SourceIndex, plan) -> list:
         for f in getattr(ins, "flattened", ()):
             fa, fb = subtree_range(orig_index, f)
             gone.update(range(fa, fb))
-        block = [sigs[i] for i in range(a, b) if i not in gone]
+        ins_over = getattr(ins, "attr_overrides", None) or {}
+        block = [(base[i][0], ins_over.get(i, base[i][1]), base[i][2]) for i in range(a, b) if i not in gone]
         target = before if ins.before else after
         target.setdefault(ins.anchor_ordinal, []).append(block)
     out = []

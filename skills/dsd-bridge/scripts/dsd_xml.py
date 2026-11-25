@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""DSD브릿지(dsd-bridge) import 가 못 하는 .dsd(contents.xml) 후처리 + XSD(dart4) 검증. 입력 파일은 덮어쓰지 않는다(-o 필수).
+"""DSD브릿지(dsd-bridge) .dsd(contents.xml) 점검(info)·남은 후처리 + XSD(dart4) 검증. 입력 파일은 덮어쓰지 않는다(-o 필수).
+
+0.3.0 부터 import 가 기간 속성(날짜 칸 글을 고치면), 신규 행 계정코드(--acode), 회색 문단 글자, 콤마를 직접 처리한다.
+아래 period/acode/replace/commas 는 그래도 남은 것을 고치거나 이미 만든 .dsd 를 손볼 때 쓴다.
 
 명령:
   info     <in.dsd>                                   기간 속성(AUNITVALUE)·COMM_DATE·자리표시(○)·콤마 누락·같은 ACODE 가 붙은 행 보고

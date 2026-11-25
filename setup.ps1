@@ -31,6 +31,14 @@ if (-not $ok) {
 }
 & $vpy -c "import openpyxl, lxml; print('openpyxl', openpyxl.__version__, '/ lxml', lxml.__version__)"
 
+# 엑셀 조종(병합 표 행 끼우기, 스킬의 dsd_insert_rows.py)용 pywin32. 없어도 핵심 기능은 된다(0.3.0)
+& $vpy -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('win32com') else 1)"
+if ($LASTEXITCODE -ne 0) {
+    & $vpy -m pip install -q --retries 1 --timeout 15 pywin32
+    if ($LASTEXITCODE -eq 0) { Write-Host 'pywin32 설치 완료(엑셀 행 끼우기용)' }
+    else { Write-Host '안내: pywin32 설치 실패. 병합 표 행 끼우기(dsd_insert_rows.py)만 못 쓰고 나머지는 정상입니다.' }
+}
+
 Write-Host '--- 스모크 테스트'
 & $vpy dsd_bridge.py --help | Select-Object -First 3
 & $vpy dsd_bridge.py --version

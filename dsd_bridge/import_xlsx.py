@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -40,12 +41,14 @@ from .gates import (
     gate_monotonic,
     gate_seq_duplicates,
 )
+from .mixededit import plan_mixed_edit
 from .model import CELL_TAGS, RO_SUFFIX, DocModel, project
 from .rowedit import RowPlan, clone_p_bytes, clone_tr_bytes, delete_span, insert_patch, plan_rows
 from .sheetstate import FIRST_VALUE_COL, WorkbookState, load_workbook_state
 from .text import (
     canonical_out,
     count_bare_amp,
+    cr_to_lf,
     escape_text,
     format_number,
     lf_to_cr,
@@ -59,7 +62,14 @@ from .validate import (
     subtree_size,
     xsd_validate,
 )
-from .xmlsplice import PatchSet, SourceIndex, check_rewrite_identity, set_text_patch
+from .xmlsplice import (
+    PatchSet,
+    SourceIndex,
+    attr_value_patch,
+    check_rewrite_identity,
+    set_attr_value,
+    set_text_patch,
+)
 
 #: AC-27 경고 (문자열 일치 테스트 대상).
 EXTRACTION_WARNING = (
@@ -68,9 +78,15 @@ EXTRACTION_WARNING = (
 )
 #: AC-16 오류 (문자열 일치 테스트 대상).
 MIXED_EDIT_ERROR = (
-    "오류: 시트 '{sheet}' {row}행 {col}열 (요소 {id}) 은(는) 서식 조각(SPAN/P)을 포함한 문단·셀입니다. "
-    "지금 저장하면 그 서식이 사라집니다. 원래 값으로 되돌리거나, 손실을 감수하려면 --allow-lossy-mixed 를 사용하세요."
+    "오류: 시트 '{sheet}' {row}행 {col}열 (요소 {id}) 은(는) 서식 조각(SPAN/P)을 포함한 문단·셀인데, 이 편집은 "
+    "서식을 그대로 둔 채 글자만 바꿀 수 없습니다(칸 안 문단(P)·그림처럼 서식 조각이 아닌 요소를 함께 지우게 되는 "
+    "편집 등). 바꾸는 범위를 줄이거나, 서식 손실을 감수하려면 --allow-lossy-mixed 를 사용하세요."
 )
+#: 0.3.0 — 글을 고쳐 날짜 속성값(AUNITVALUE)을 따라 바꾸는 칸의 AUNIT 값.
+DATE_AUNITS = frozenset({"PERIODFROM", "PERIODTO", "PERIODFROM2", "PERIODTO2",
+                         "SUB_PERIODFROM", "SUB_PERIODTO", "COMM_DATE"})
+#: 표준계정코드에 없는 신설 계정 코드 (DART 편집기 관행).
+NEW_ACCOUNT_CODE = "99999999999999"
 
 
 @dataclass
@@ -98,6 +114,7 @@ class ImportReport:
     inserted: int = 0
     deleted: int = 0
     warnings: list = field(default_factory=list)
+    notices: list = field(default_factory=list)          # "안내:" 줄 (0.3.0 — 자동 보정 내역)
     gates: dict = field(default_factory=dict)            # 이름 → GateResult
     xsd_original: ValidationResult | None = None
     xsd_result: ValidationResult | None = None
@@ -143,6 +160,8 @@ class ImportReport:
             lines.append(
                 f"  · {c.sheet} {c.row}행 {c.col}열 (요소 {c.id}) 표기 패턴: {c.inherited.describe()}"
             )
+        for n in self.notices:
+            lines.append(n if n.startswith("안내") else f"안내: {n}")
         for w in self.warnings:
             lines.append(w if w.startswith("경고") else f"경고: {w}")
         lines.append(self.xsd_line_ko())
@@ -181,8 +200,10 @@ def _whitespace_only(a: str, b: str) -> bool:
 
 def import_(xlsx, dsd, out=None, *, force_hash: bool = False, allow_bulk_delete: bool = False,
             allow_lossy_mixed: bool = False, no_meta_size: bool = False, log=None,
-            dart_root=None) -> ImportReport:
+            dart_root=None, acodes: dict | None = None) -> ImportReport:
+    """`acodes` = {새 행 라벨: 표준계정코드} (0.3.0, `--acode`). 복제로 끼운 행의 계정코드를 바꾼다."""
     log = log or (lambda *_: None)
+    acodes = _normalize_acodes(acodes)
     xlsx_path = Path(xlsx)
     dsd_path = Path(dsd)
     out_path = Path(out) if out else default_output_path(xlsx_path)
@@ -273,7 +294,9 @@ def import_(xlsx, dsd, out=None, *, force_hash: bool = False, allow_bulk_delete:
     patches = PatchSet()
     _diff_and_patch(state, model, baseline, plan, index, raw, patches, report,
                     allow_lossy_mixed=allow_lossy_mixed)
-    _build_insert_patches(model, plan, index, raw, patches, report)
+    _build_insert_patches(model, plan, index, raw, patches, report, acodes=acodes)
+    if report.changes:
+        _warn_stale_date_attrs(model, index, report, plan)
     bare = (sum(count_bare_amp(c.new) for c in report.changes)
             + sum(count_bare_amp(t) for ins in plan.inserted for t in ins.new_texts if t))
     if bare:
@@ -376,6 +399,47 @@ def _diff_and_patch(state: WorkbookState, model: DocModel, baseline: dict, plan:
                 base_block_out[r["id"]] = r["values"][0]["out"]
 
     mixed_edits = []
+    mixed_done = []
+    date_changes = []
+
+    def apply_mixed(ordinal: int, new_text: str, ch: CellChange) -> bool:
+        """0.3.0 — 서식 조각을 그대로 두고 바뀐 글자만 바꾼다. 못 하면 False (예전처럼 거부·평문화)."""
+        me = plan_mixed_edit(index, raw, ordinal, cr_to_lf(new_text))
+        if me is None:
+            return False
+        for p in me.patches:
+            patches.add(p)
+        plan.planned_deletions.update(me.deleted)
+        mixed_done.append((ch, me))
+        return True
+
+    def date_attr(mc, new_text: str, ch: CellChange) -> None:
+        """0.3.0 — 날짜 칸(AUNIT=PERIODFROM 등)의 글을 고치면 숨은 날짜 속성값(AUNITVALUE)도 맞춘다."""
+        sp = index[mc.ordinal]
+        aunit = sp.attrs.get("AUNIT")
+        old_val = sp.attrs.get("AUNITVALUE")
+        if aunit not in DATE_AUNITS or old_val is None:
+            return
+        where = f"시트 '{ch.sheet}' {ch.row}행 {ch.col}열"
+        ymd = date_from_text(cr_to_lf(new_text))
+        if ymd is None:
+            if new_text.strip():
+                report.warnings.append(
+                    f"경고: {where} 날짜 칸({aunit})의 글에서 날짜 하나를 읽지 못해 숨은 날짜 속성값"
+                    f"({old_val or '빈 값'})을 그대로 두었습니다. 날짜가 정해지면 'YYYY년 MM월 DD일' 로 적어 "
+                    "다시 되돌리거나 DART 편집기에서 다시 입력하세요."
+                )
+            return
+        if ymd == old_val:
+            return
+        if sp.self_closing:
+            report.warnings.append(f"경고: {where} 날짜 칸({aunit})의 속성값을 바꾸지 못했습니다(빈 요소). "
+                                   "DART 편집기에서 확인하세요.")
+            return
+        patch, new_attr = attr_value_patch(index, mc.ordinal, "AUNITVALUE", ymd)
+        patches.add(patch)
+        plan.attr_overrides[mc.ordinal] = new_attr
+        date_changes.append(f"{aunit} {old_val or '(빈 값)'}→{ymd}")
 
     def flatten(ordinal: int, new_text: str, ch: CellChange) -> None:
         """--allow-lossy-mixed: 내부 구간 전체를 평문으로 치환하고 자식 서브트리를 계획된 삭제로 등록."""
@@ -408,12 +472,17 @@ def _diff_and_patch(state: WorkbookState, model: DocModel, baseline: dict, plan:
                 ch.new = new_text
                 ch.whitespace_only = _whitespace_only(canonical_out(mc.display), cur)
                 if mc.mixed:
+                    if apply_mixed(mc.ordinal, new_text, ch):
+                        report.changes.append(ch)
+                        date_attr(mc, new_text, ch)
+                        continue
                     if not allow_lossy_mixed:
                         mixed_edits.append(ch)
                         continue
                     flatten(mc.ordinal, new_text, ch)
                 patches.add(set_text_patch(index, mc.ordinal, escape_text(new_text).encode("utf-8")))
                 report.changes.append(ch)
+                date_attr(mc, new_text, ch)
         else:
             b = by_eid_block[r.id]
             excel_val = r.value_at(0)
@@ -424,12 +493,13 @@ def _diff_and_patch(state: WorkbookState, model: DocModel, baseline: dict, plan:
             ch = CellChange(sheet_name, r.row, _excel_col(0), r.id, b.ordinal, b.text, new_text, "block",
                             mixed=b.mixed)
             ch.whitespace_only = _whitespace_only(canonical_out(b.display), cur)
-            if b.mixed:
-                if not allow_lossy_mixed:
-                    mixed_edits.append(ch)
-                    continue
-                flatten(b.ordinal, new_text, ch)
-            patches.add(set_text_patch(index, b.ordinal, escape_text(new_text).encode("utf-8")))
+            if not (b.mixed and apply_mixed(b.ordinal, new_text, ch)):
+                if b.mixed:
+                    if not allow_lossy_mixed:
+                        mixed_edits.append(ch)
+                        continue
+                    flatten(b.ordinal, new_text, ch)
+                patches.add(set_text_patch(index, b.ordinal, escape_text(new_text).encode("utf-8")))
             report.changes.append(ch)
             if b.kind == "TITLE" and b.atoc == "Y":
                 report.warnings.append(
@@ -440,6 +510,24 @@ def _diff_and_patch(state: WorkbookState, model: DocModel, baseline: dict, plan:
     if mixed_edits:
         ch = mixed_edits[0]
         raise UnsupportedEdit(MIXED_EDIT_ERROR.format(sheet=ch.sheet, row=ch.row, col=ch.col, id=ch.id))
+    if mixed_done:
+        where = ", ".join(f"{ch.sheet} {ch.row}행" for ch, _ in mixed_done[:6])
+        more = f" 외 {len(mixed_done) - 6}곳" if len(mixed_done) > 6 else ""
+        gone = sum(len(me.deleted) for _, me in mixed_done)
+        tail = f" 글자가 모두 지워진 서식 조각 {gone}개는 요소째 지웠습니다." if gone else ""
+        nl = [f"{ch.sheet} {ch.row}행" for ch, me in mixed_done if me.after_raw_newline]
+        if nl:
+            tail += (f" {', '.join(nl[:4])} 은(는) 원본 XML 줄바꿈 바로 뒤에 글을 넣었습니다. 엑셀에서는 줄이 바뀌어 "
+                     "보여도 DART 에서는 앞 글과 이어질 수 있으니 편집기에서 확인하세요.")
+        report.notices.append(
+            f"안내: 서식 조각(SPAN)이 섞인 회색 칸·문단 {len(mixed_done)}곳은 서식을 그대로 두고 바뀐 글자만 "
+            f"반영했습니다({where}{more}).{tail}"
+        )
+    if date_changes:
+        report.notices.append(
+            f"안내: 날짜 칸의 글에 맞춰 숨은 날짜 속성값(AUNITVALUE) {len(date_changes)}곳을 바꿨습니다: "
+            + ", ".join(date_changes)
+        )
 
 
 def _check_formula_cells(state: WorkbookState, report: ImportReport) -> None:
@@ -470,9 +558,17 @@ def _check_formula_cells(state: WorkbookState, report: ImportReport) -> None:
 
 
 def _build_insert_patches(model: DocModel, plan: RowPlan, index: SourceIndex, raw: bytes,
-                          patches: PatchSet, report: ImportReport) -> None:
-    """삽입 행 → 앵커(복제 원본) 바이트 복제 패치 (§4.8, §4.9, AC-7, AC-24)."""
+                          patches: PatchSet, report: ImportReport, *, acodes: dict | None = None) -> None:
+    """삽입 행 → 앵커(복제 원본) 바이트 복제 패치 (§4.8, §4.9, AC-7, AC-24).
+
+    0.3.0: 복제한 표 행은 원본 행의 계정코드(`ACODE`)를 그대로 물려받는다. `acodes`(라벨 → 코드)에
+    새 행의 라벨이 있으면 그 코드로 바꾸고, 없는데 라벨이 원본 행과 다르면 경고한다.
+    """
+    acodes = acodes or {}
+    used: set = set()
+    new_labels: list = []
     if not plan.inserted:
+        _raise_unused_acodes(acodes, used, new_labels)
         return
     by_eid_cell = {}
     table_of_cell = {}
@@ -517,7 +613,7 @@ def _build_insert_patches(model: DocModel, plan: RowPlan, index: SourceIndex, ra
                     new_texts.append("")
                 elif _is_number(v):
                     d = Decimal(str(v)) if not isinstance(v, Decimal) else v
-                    res = resolve_pattern(mc, table_of_cell[mc.eid], negative=d < 0)
+                    res = resolve_pattern(mc, table_of_cell[mc.eid], negative=d < 0, value=d)
                     new_texts.append(format_number(d, res.pattern))
                     if res.level != "self":
                         report.changes.append(CellChange(ins.sheet, r.row, _excel_col(r.col_of(i)), "",
@@ -525,9 +621,16 @@ def _build_insert_patches(model: DocModel, plan: RowPlan, index: SourceIndex, ra
                                                          inherited=res, table_id=ins.table_id))
                 else:
                     new_texts.append(lf_to_cr(str(v)))
-            payload, flattened = clone_tr_bytes(index, raw, ins.clone_ordinal, new_texts, keep)
+            attr_values = _clone_date_attrs(index, cells, new_texts, keep, ins, report, where)
+            payload, flattened = clone_tr_bytes(index, raw, ins.clone_ordinal, new_texts, keep,
+                                                attr_values=attr_values)
             ins.flattened = flattened
             ins.new_texts = new_texts
+            anchor_label = by_eid_cell[index.eid_of(cells[0])].text if cells else ""
+            label = new_texts[0] if new_texts and new_texts[0] is not None else anchor_label
+            payload = _apply_acode(index, ins, payload, label, anchor_label, acodes, used, report, where)
+            if label:
+                new_labels.append(cr_to_lf(label).strip())
         elif ins.kind == "P":
             b = by_eid_block[index.eid_of(ins.clone_ordinal)]
             v = r.value_at(0)
@@ -544,6 +647,163 @@ def _build_insert_patches(model: DocModel, plan: RowPlan, index: SourceIndex, ra
         else:
             raise UnsupportedEdit(f"오류: {where} — {ins.kind} 행은 삽입할 수 없습니다.")
         patches.add(insert_patch(index, ins, payload))
+    _raise_unused_acodes(acodes, used, new_labels)
+
+
+#: 숫자 계정코드만 — `COMM_NO`·`PLC_*` 같은 필드 코드(외부감사 실시내용 표 등)는 건드리지 않는다.
+_RE_ACODE = re.compile(rb'(\sACODE=")(\d+)(")')
+_RE_SPACES = re.compile(r"[\s\u3000]+")
+
+
+def norm_label(text: str) -> str:
+    """라벨 비교용 — 공백·줄바꿈(`&cr;` 포함)을 모두 없앤다."""
+    return _RE_SPACES.sub("", cr_to_lf(text or ""))
+
+
+def _normalize_acodes(acodes) -> dict:
+    """`{라벨: 코드}` → `{정규화 라벨: (라벨, 코드)}`. 코드는 숫자만 (표준계정코드 14자리, 신설 99999999999999)."""
+    out: dict = {}
+    for label, code in (acodes or {}).items():
+        code = str(code).strip()
+        if not re.fullmatch(r"\d{1,20}", code):
+            raise InputError(f"오류: --acode 의 계정코드는 숫자만 쓸 수 있습니다: {label}={code}")
+        key = norm_label(label)
+        if not key:
+            raise InputError(f"오류: --acode 의 라벨이 비어 있습니다: ={code}")
+        out[key] = (label, code)
+    return out
+
+
+def _apply_acode(index: SourceIndex, ins, payload: bytes, label: str, anchor_label: str, acodes: dict,
+                 used: set, report: ImportReport, where: str) -> bytes:
+    codes = sorted({m.group(2).decode("utf-8", "replace") for m in _RE_ACODE.finditer(payload)})
+    key = norm_label(label)
+    disp = cr_to_lf(label).strip()
+    hit = acodes.get(key) if key else None
+    if hit is not None:
+        used.add(key)
+        code = hit[1]
+        if not codes:
+            raise InputError(
+                f"오류: {where} 새 행 '{disp}' 에는 숫자 계정코드(ACODE) 칸이 없어 --acode 를 쓸 수 없습니다"
+                "(계정코드가 없는 양식이거나, 외부감사 실시내용 표처럼 필드 코드를 쓰는 행입니다)."
+            )
+        new_payload = _RE_ACODE.sub(lambda m: m.group(1) + code.encode("ascii") + m.group(3), payload)
+        a = ins.clone_ordinal
+        stack = [a]
+        while stack:
+            o = stack.pop()
+            if o in ins.flattened:
+                continue
+            ab = ins.attr_overrides.get(o, index.attr_bytes(o))
+            if _RE_ACODE.search(b" " + ab):
+                ins.attr_overrides[o] = _RE_ACODE.sub(
+                    lambda m: m.group(1) + code.encode("ascii") + m.group(3), b" " + ab)[1:]
+            stack.extend(index[o].child_ordinals)
+        report.notices.append(f"안내: {where} 새 행 '{disp}' 계정코드 {'/'.join(codes) or '(빈 값)'} → {code}")
+        return new_payload
+    inherited = [c for c in codes if c and set(c) != {"9"}]
+    if inherited and key and key != norm_label(anchor_label):
+        report.warnings.append(
+            f"경고: {where} 새 행 '{disp}' 이(가) 복제 원본 행 '{cr_to_lf(anchor_label).strip()}' 의 계정코드"
+            f"({'/'.join(inherited)})를 물려받았습니다. DART 편집기 재무제표 검사(F9)에서 계정 오류가 날 수 있으니 "
+            f"--acode \"{disp}=표준계정코드\" 로 지정하세요(표준계정코드표에 없는 신설 계정은 {NEW_ACCOUNT_CODE})."
+        )
+    return payload
+
+
+def _clone_date_attrs(index: SourceIndex, cells: list, new_texts: list, keep: set, ins,
+                      report: ImportReport, where: str) -> dict:
+    """복제로 끼운 행의 날짜 칸 — 원본 행의 숨은 날짜(AUNITVALUE)를 새 글의 날짜로 바꾼다.
+
+    날짜를 못 읽으면 원본 행의 날짜를 남기지 않고 비운다(새 행에 엉뚱한 날짜가 숨어 있지 않도록).
+    반환: `{셀 순번: {"AUNITVALUE": 값}}` (`clone_tr_bytes(attr_values=)`). 구조 검사용 기대 속성도 기록한다.
+    """
+    out: dict = {}
+    for i, c in enumerate(cells):
+        sp = index[c]
+        aunit = sp.attrs.get("AUNIT")
+        old = sp.attrs.get("AUNITVALUE")
+        if aunit not in DATE_AUNITS or old is None or c in keep:
+            continue
+        text = new_texts[i] if i < len(new_texts) and new_texts[i] is not None else ""
+        ymd = date_from_text(cr_to_lf(text))
+        if ymd is None:
+            if text.strip():
+                report.warnings.append(
+                    f"경고: {where} 새 행 날짜 칸({aunit})의 글에서 날짜 하나를 읽지 못해 숨은 날짜 속성값을 "
+                    "비워 두었습니다. 날짜가 정해지면 'YYYY년 MM월 DD일' 로 적어 다시 되돌리세요."
+                )
+            ymd = ""
+        if ymd == old:
+            continue
+        out[c] = {"AUNITVALUE": ymd}
+        head = b" " + index.attr_bytes(c)
+        ins.attr_overrides[c] = set_attr_value(head, "AUNITVALUE", ymd)[1:]
+        report.notices.append(f"안내: {where} 새 행 날짜 칸 {aunit} {old or '(빈 값)'}→{ymd or '(빈 값)'}")
+    return out
+
+
+def _raise_unused_acodes(acodes: dict, used: set, new_labels: list) -> None:
+    unused = [acodes[k][0] for k in acodes if k not in used]
+    if unused:
+        shown = ", ".join(f"'{x}'" for x in new_labels[:12]) or "없음"
+        raise InputError(
+            f"오류: --acode 로 지정한 라벨({', '.join(unused)})과 같은 새로 끼운 행이 없습니다. "
+            f"새로 끼운 표 행: {shown}. 라벨을 엑셀에 보이는 그대로(공백은 무시) 적으세요."
+        )
+
+
+_RE_DATE_KO = re.compile(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일")
+_RE_DATE_NUM = re.compile(r"(?<!\d)(\d{4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})(?!\d)")
+
+
+def date_from_text(text: str):
+    """칸 글에서 날짜 **하나**를 `YYYYMMDD` 로. 없거나 둘 이상(서로 다름)이거나 달력에 없는 날이면 `None`."""
+    found = set()
+    for rx in (_RE_DATE_KO, _RE_DATE_NUM):
+        for m in rx.finditer(text or ""):
+            y, mo, d = (int(g) for g in m.groups())
+            try:
+                _dt.date(y, mo, d)
+            except ValueError:
+                return None
+            found.add(f"{y:04d}{mo:02d}{d:02d}")
+    return found.pop() if len(found) == 1 else None
+
+
+def _warn_stale_date_attrs(model: DocModel, index: SourceIndex, report: ImportReport, plan: RowPlan) -> None:
+    """고치지 않은 날짜 칸인데 글과 숨은 속성값이 다르면 알린다 (옛 보고서에서 이월된 값)."""
+    deleted = plan.deleted_ordinals()
+    stale = []
+    for b in model.blocks:
+        if b.table is None:
+            continue
+        for r in b.table.rows:
+            for c in r.cells:
+                sp = index[c.ordinal]
+                aunit = sp.attrs.get("AUNIT")
+                if aunit not in DATE_AUNITS or c.ordinal in plan.attr_overrides:
+                    continue
+                po, gone = c.ordinal, False
+                while po >= 0:
+                    if po in deleted:
+                        gone = True
+                        break
+                    po = index[po].parent_ordinal
+                if gone:
+                    continue
+                if any(ch.ordinal == c.ordinal for ch in report.changes):
+                    continue
+                ymd = date_from_text(cr_to_lf(c.text))
+                val = sp.attrs.get("AUNITVALUE")
+                if ymd and val is not None and val != ymd:
+                    stale.append(f"{aunit} 글 {ymd} / 속성 {val or '빈 값'} (원본 {sp.line}행)")
+    if stale:
+        report.warnings.append(
+            "경고: 고치지 않은 날짜 칸 중 글과 숨은 날짜 속성값(AUNITVALUE)이 다른 곳이 있습니다(옛 보고서에서 "
+            "이월된 값일 수 있음): " + ", ".join(stale) + ". 그 칸의 날짜 글을 엑셀에서 고치면 속성값도 같이 맞춰집니다."
+        )
 
 
 def _new_text_for_cell(mc, table, excel_val, ch: CellChange) -> str:
@@ -552,7 +812,7 @@ def _new_text_for_cell(mc, table, excel_val, ch: CellChange) -> str:
         return ""
     if _is_number(excel_val):
         d = Decimal(str(excel_val)) if not isinstance(excel_val, Decimal) else excel_val
-        res = resolve_pattern(mc, table, negative=d < 0)
+        res = resolve_pattern(mc, table, negative=d < 0, value=d)
         ch.inherited = res
         return format_number(d, res.pattern)
     return lf_to_cr(str(excel_val))

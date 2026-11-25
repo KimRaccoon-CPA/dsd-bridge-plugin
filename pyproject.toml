@@ -1,6 +1,6 @@
 [project]
 name = "dsd-bridge"
-version = "0.2.2"
+version = "0.3.0"
 description = "DSD브릿지: DART 감사보고서(.dsd)를 엑셀로 펼쳐 정산표 숫자로 고치고, 검증한 뒤 그대로 되돌리는 도구"
 requires-python = ">=3.13"
 dependencies = ["openpyxl==3.1.5", "lxml==6.1.3"]

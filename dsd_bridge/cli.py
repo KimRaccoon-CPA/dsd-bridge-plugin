@@ -2,7 +2,9 @@
 
 - `dsd-bridge export <입력.dsd> [-o 출력.xlsx] [-v] [--split-notes]`
 - `dsd-bridge import <입력.xlsx> --dsd <원본.dsd> -o <출력.dsd> [-v] [--force-hash]
-  [--allow-bulk-delete] [--allow-lossy-mixed] [--no-meta-size]`
+  [--allow-bulk-delete] [--allow-lossy-mixed] [--no-meta-size] [--acode "라벨=코드" …]`
+  — 0.3.0: 서식 조각이 섞인 회색 칸·문단은 서식을 두고 글자만 바꾸고, 날짜 칸(기간·커뮤니케이션 일자)의
+  글을 고치면 숨은 날짜 속성값도 맞추며, `--acode` 로 새로 끼운 행의 계정코드를 지정한다.
 - `dsd-bridge check <입력.dsd|입력.xlsx> [--json 경로] [--tolerance N] [--xref] [--xref-min N]
   [--settlement 정산표.xlsx] [--settlement-map 경로.json] [--report 경로.xlsx] [-v]`
   — 합계검증 (1.2 WP4). 불일치가 있으면 종료 코드 8 이며, 오류가 아니라 **검사 결과**다.
@@ -12,8 +14,8 @@
 - `dsd-bridge diff <전.xlsx> <후.xlsx> [--rollforward] [--json 경로] [-v]` — 통합문서 비교 (1.3).
 
 모든 `DsdBridgeError` 는 `message_ko` 를 표준 오류로 출력하고 그 `exit_code` 로 끝난다.
-사용자 대면 플래그는 4개(D3): `--force-hash`, `--allow-bulk-delete`, `--allow-lossy-mixed`,
-`--no-meta-size`. `--allow-reorder` 는 없다(rev4 — 지킬 수 없는 약속). `--no-merge` 는 테스트 전용이라
+사용자 대면 플래그는 5개: `--force-hash`, `--allow-bulk-delete`, `--allow-lossy-mixed`,
+`--no-meta-size`, `--acode`(0.3.0). `--allow-reorder` 는 없다(rev4 — 지킬 수 없는 약속). `--no-merge` 는 테스트 전용이라
 `--help` 에서 숨긴다.
 """
 
@@ -101,6 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-meta-size",
         action="store_true",
         help="meta.xml 의 FILE-INFO size 를 다시 계산하지 않습니다.",
+    )
+    p_import.add_argument(
+        "--acode",
+        metavar="라벨=코드",
+        action="append",
+        default=[],
+        help=("새로 끼운 표 행의 계정코드(ACODE)를 지정합니다. 복제한 행은 원본 행의 코드를 물려받습니다. "
+              "여러 번 쓸 수 있습니다. 예: --acode \"장기금융상품=11211100010000\" "
+              "(표준계정코드표에 없는 신설 계정은 99999999999999)"),
     )
     p_import.set_defaults(func=cmd_import)
 
@@ -226,6 +237,18 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_acodes(items) -> dict:
+    from dsd_bridge.errors import InputError
+
+    out: dict = {}
+    for item in items or []:
+        label, sep, code = str(item).rpartition("=")
+        if not sep or not label.strip() or not code.strip():
+            raise InputError(f"오류: --acode 는 \"라벨=코드\" 형식이어야 합니다: {item}")
+        out[label.strip()] = code.strip()
+    return out
+
+
 def cmd_import(args: argparse.Namespace) -> int:
     from dsd_bridge.import_xlsx import import_
 
@@ -238,6 +261,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         allow_lossy_mixed=args.allow_lossy_mixed,
         no_meta_size=args.no_meta_size,
         log=_log(args.verbose),
+        acodes=_parse_acodes(args.acode),
     )
     print(report.summary_ko())
     return 0

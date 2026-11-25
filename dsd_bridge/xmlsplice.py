@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from xml.parsers import expat
 
@@ -432,6 +433,40 @@ def set_text_patch(index: SourceIndex, ordinal: int, new_inner: bytes) -> Patch:
     )
 
 
+def _attr_re(name: str):
+    return re.compile(rb'(\s' + re.escape(name.encode("ascii")) + rb'=")([^"]*)(")')
+
+
+def _attr_escape(value: str) -> bytes:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;").encode("utf-8")
+
+
+def set_attr_value(tag_bytes: bytes, name: str, value: str) -> bytes:
+    """시작 태그(또는 `attr_bytes` 앞에 공백을 붙인 것) 안 속성 `name` 의 값만 바꾼 바이트. 없으면 그대로."""
+    return _attr_re(name).sub(lambda m: m.group(1) + _attr_escape(value) + m.group(3), tag_bytes, count=1)
+
+
+def attr_value_patch(index: SourceIndex, ordinal: int, name: str, value: str) -> tuple:
+    """시작 태그 안 속성 `name="…"` 의 **값 바이트만** 바꾸는 패치 (0.3.0).
+
+    반환 `(Patch, 바뀐 뒤의 attr_bytes)` — 두 번째 값은 구조 동등성 검사(§4.10 검사 3)의 기대 서명에
+    쓴다. 값에는 `&`·`<`·`"` 를 이스케이프해 넣는다. 속성이 없으면 `PatchIntegrityError`.
+    """
+    sp = index[ordinal]
+    head = index.raw[sp.start_lt : sp.start_gt]
+    m = _attr_re(name).search(head)
+    if not m:
+        raise PatchIntegrityError(f"속성 {name} 을(를) 찾을 수 없습니다: {sp.tag}#{ordinal} (행 {sp.line})")
+    newb = _attr_escape(value)
+    start = sp.start_lt + m.start(2)
+    end = sp.start_lt + m.end(2)
+    head2 = head[: m.start(2)] + newb + head[m.end(2) :]
+    attr = head2[1 + len(sp.tag.encode("utf-8")) : -1]
+    if attr.endswith(b"/"):
+        attr = attr[:-1]
+    return Patch(start, end, newb, label=f"{sp.tag}#{ordinal} @{name}"), attr.strip()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 사후 검사 (계획 §4.10)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -565,6 +600,8 @@ def escape_roundtrip_check(index: SourceIndex, raw: bytes) -> dict:
 
 
 __all__ = [
+    "attr_value_patch",
+    "set_attr_value",
     "ElementSpan",
     "SourceIndex",
     "Patch",

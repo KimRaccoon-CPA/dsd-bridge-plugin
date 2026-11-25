@@ -23,7 +23,7 @@ from .gates import EID_RE
 from .model import CELL_TAGS, RO_SUFFIX
 from .sheetstate import MAPPED_KINDS, SheetRow, WorkbookState
 from .text import escape_text
-from .xmlsplice import Patch, SourceIndex
+from .xmlsplice import Patch, SourceIndex, set_attr_value
 
 
 @dataclass
@@ -46,6 +46,7 @@ class InsertedRow:
     duplicate: bool = False      # AC-24 복제 삽입 (_ID 있음)
     flattened: set = field(default_factory=set)   # 사본에서 평문화된 자식(혼합 셀의 자식) 서브트리 루트 순번
     new_texts: list = field(default_factory=list) # 사본 셀에 넣은 원문 (진단용)
+    attr_overrides: dict = field(default_factory=dict)  # 0.3.0 사본에서 속성을 바꾼 요소: 원본 순번 → attr_bytes
 
     @property
     def position_ordinal(self) -> int:
@@ -67,6 +68,7 @@ class RowPlan:
     inserted: list = field(default_factory=list)
     deleted: list = field(default_factory=list)
     planned_deletions: set = field(default_factory=set)   # 평탄화로 사라지는 자식 서브트리 루트 순번
+    attr_overrides: dict = field(default_factory=dict)    # 0.3.0 속성값을 바꾼 원본 요소: 순번 → attr_bytes
     warnings: list = field(default_factory=list)
 
     def deleted_ordinals(self) -> set:
@@ -307,7 +309,7 @@ def _open_tag_for_text(index: SourceIndex, ordinal: int) -> bytes:
 
 
 def clone_tr_bytes(index: SourceIndex, raw: bytes, anchor: int, new_texts: list,
-                   keep_verbatim: set | None = None) -> tuple:
+                   keep_verbatim: set | None = None, attr_values: dict | None = None) -> tuple:
     """앵커 `TR` 의 `[선행공백_시작, end_gt)` 를 복사하고 셀 내부 텍스트만 갈아끼운다 (§4.8, AC-7).
 
     - `new_texts[i]` 는 i 번째 셀의 **원문**(escape 전, `&cr;` 유지). `None` 이면 빈 문자열.
@@ -318,7 +320,15 @@ def clone_tr_bytes(index: SourceIndex, raw: bytes, anchor: int, new_texts: list,
 
     반환: `(bytes, flattened_child_ordinals)`. 속성(`ACOPY`/`ADELETE`/`WIDTH`/`HEIGHT`/`ACODE`/`ADELIM`/
     `ALEVEL`/`USERMARK`/`ACOPYCOL`/`ADELETECOL`/`AMOVECOL` …)은 바이트 단위로 복제된다.
+    `attr_values` = `{셀 순번: {속성: 값}}` 이면 그 셀 시작 태그의 속성값만 바꿔 넣는다 (0.3.0 날짜 칸).
     """
+    attr_values = attr_values or {}
+
+    def fix(c: int, tag: bytes) -> bytes:
+        for name, value in attr_values.get(c, {}).items():
+            tag = set_attr_value(tag, name, value)
+        return tag
+
     keep_verbatim = keep_verbatim or set()
     sp = index[anchor]
     cells = [c for c in sp.child_ordinals if index[c].tag in CELL_TAGS]
@@ -330,10 +340,10 @@ def clone_tr_bytes(index: SourceIndex, raw: bytes, anchor: int, new_texts: list,
         cs = index[c]
         out.append(raw[pos : cs.start_lt])
         if c in keep_verbatim:
-            out.append(raw[cs.start_lt : cs.end_gt])
+            out.append(fix(c, raw[cs.start_lt : cs.start_gt]) + raw[cs.start_gt : cs.end_gt])
         else:
             text = new_texts[i] if i < len(new_texts) and new_texts[i] is not None else ""
-            out.append(_open_tag_for_text(index, c))
+            out.append(fix(c, _open_tag_for_text(index, c)))
             out.append(escape_text(text).encode("utf-8"))
             out.append(b"</" + cs.tag.encode("utf-8") + b">")
             flattened.update(cs.child_ordinals)

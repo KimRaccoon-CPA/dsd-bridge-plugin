@@ -360,6 +360,10 @@ class PatternResolution:
     level: str                   # "self" | "column" | "column-negative" | "table" | "default"
 
     def describe(self) -> str:
+        base, plus, _ = self.level.partition("+")
+        text = PatternResolution(self.pattern, self.source, base).describe() if plus else None
+        if text is not None:
+            return text + " (콤마는 같은 열·표에서 4자리 이상 숫자의 표기를 따름)"
         if self.level == "self":
             return "원본 셀의 표기 패턴"
         if self.level in ("column", "column-negative"):
@@ -372,7 +376,21 @@ class PatternResolution:
         return "기본 패턴 (콤마, 소수 0자리, 괄호 음수)"
 
 
-def resolve_pattern(cell, table, *, negative: bool = False) -> PatternResolution:
+#: 천 단위 콤마가 나타날 수 있는 가장 작은 절댓값. 이보다 작은 원본 숫자(`7`, `(120)`)는 콤마가 없어도
+#: 그 칸이 "콤마 없이 쓰는 칸" 이라는 증거가 되지 않는다.
+GROUPING_MIN = Decimal(1000)
+
+
+def _grouping_evidence(c) -> bool:
+    """이 셀의 표기가 콤마 사용 여부를 실제로 보여 주는가 — 콤마가 있거나, 4자리 이상인데 콤마가 없을 때."""
+    if c.pattern is None:
+        return False
+    if c.pattern.grp:
+        return True
+    return c.value is not None and abs(c.value) >= GROUPING_MIN
+
+
+def resolve_pattern(cell, table, *, negative: bool = False, value=None) -> PatternResolution:
     """변경된 셀에 적용할 `NumPattern` 을 §4.5 복원 규칙 1~4 로 정한다 (AC-13).
 
     1. 그 셀에 패턴이 있으면(원본이 숫자였음) 그대로.
@@ -382,26 +400,83 @@ def resolve_pattern(cell, table, *, negative: bool = False) -> PatternResolution
     3. 없으면 같은 표 전체의 최빈 패턴.
     4. 없으면 `DEFAULT_PATTERN`.
 
+    **콤마 보정 (0.3.0)**: `value`(새 값)를 주면, 위에서 고른 패턴이 콤마 없음인데 그 근거가
+    3자리 이하 숫자뿐이고(`7` 은 콤마를 쓸 일이 없었을 뿐이다) 새 값이 1,000 이상이면, 콤마 여부만
+    같은 열에서 가장 가까운 "근거 있는 셀"(콤마가 있거나 4자리 이상인 숫자)을 따른다. 열에 없으면
+    표 전체의 다수결, 그것도 없으면 콤마를 쓴다. 소수 자릿수·음수 표기는 고른 패턴 그대로다.
+    출처 표시는 `level` 에 `+grp` 를 붙인다. 원본 숫자 셀을 그대로 두는 왕복에는 영향이 없다.
+
     `cell` 은 `dsd_bridge.model.Cell`, `table` 은 `dsd_bridge.model.Table` 이다. 열 인덱스는 `TR` 내
     순서이므로 `ROWSPAN` 표에서는 시각 열과 다를 수 있다 — 그래서 출처를 돌려준다.
     """
-    if cell.pattern is not None:
-        return PatternResolution(cell.pattern, cell, "self")
+    res = _resolve_base(cell, table, negative=negative)
+    if value is None or res.pattern.grp:
+        return res
+    try:
+        big = abs(_to_decimal(value)) >= GROUPING_MIN
+    except (TypeError, InvalidOperation, ValueError):
+        return res
+    if not big:
+        return res
+    src = res.source
+    if res.level == "default" or (src is not None and _grouping_evidence(src)):
+        return res
+    grp = _column_grouping(cell, table)
+    if grp is None:
+        grp = _table_grouping(table)
+    if grp is None:
+        grp = True
+    if grp == res.pattern.grp:
+        return res
+    pat = NumPattern(grp=grp, dec=res.pattern.dec, neg=res.pattern.neg)
+    return PatternResolution(pat, src, res.level + "+grp")
 
+
+def _column_cells(cell, table):
+    """같은 표·같은 열 인덱스의 다른 셀 — 위쪽을 가까운 순으로, 그다음 아래쪽을 가까운 순으로."""
     col = cell.col
     r = cell.row_index
     rows = table.rows
+    for i in range(r - 1, -1, -1):
+        cells = rows[i].cells
+        if col < len(cells):
+            yield cells[col]
+    for i in range(r + 1, len(rows)):
+        cells = rows[i].cells
+        if col < len(cells):
+            yield cells[col]
+
+
+def _column_grouping(cell, table):
+    for c in _column_cells(cell, table):
+        if _grouping_evidence(c):
+            return c.pattern.grp
+    return None
+
+
+def _table_grouping(table):
+    yes = no = 0
+    for row in table.rows:
+        for c in row.cells:
+            if _grouping_evidence(c):
+                if c.pattern.grp:
+                    yes += 1
+                else:
+                    no += 1
+    if not yes and not no:
+        return None
+    return yes >= no
+
+
+def _resolve_base(cell, table, *, negative: bool = False) -> PatternResolution:
+    """§4.5 복원 규칙 1~4 (콤마 보정 전)."""
+    if cell.pattern is not None:
+        return PatternResolution(cell.pattern, cell, "self")
 
     def column_candidates():
-        # 위쪽을 가까운 순으로, 그다음 아래쪽을 가까운 순으로.
-        for i in range(r - 1, -1, -1):
-            cells = rows[i].cells
-            if col < len(cells) and cells[col].pattern is not None:
-                yield cells[col]
-        for i in range(r + 1, len(rows)):
-            cells = rows[i].cells
-            if col < len(cells) and cells[col].pattern is not None:
-                yield cells[col]
+        for c in _column_cells(cell, table):
+            if c.pattern is not None:
+                yield c
 
     if negative:
         for c in column_candidates():
@@ -411,7 +486,7 @@ def resolve_pattern(cell, table, *, negative: bool = False) -> PatternResolution
         return PatternResolution(c.pattern, c, "column")
 
     counter: Counter = Counter()
-    for row in rows:
+    for row in table.rows:
         for c in row.cells:
             if c.pattern is not None:
                 counter[c.pattern] += 1
