@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -166,6 +167,62 @@ class PeriodItem:
                 "old_no": self.old_no, "new_no": self.new_no}
 
 
+#: 서술 문단에서 "갱신해야 할 수 있는 숫자" 의 단서 (0.4.0) — 금액·비율·날짜·기수.
+RE_NUMBER_CLUE = re.compile(
+    r"\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:\s*(?:천원|백만원|억원|원|주))?"
+    r"|\d+(?:\.\d+)?\s*%"
+    r"|\d{4}\s*년(?:\s*\d{1,2}\s*월(?:\s*\d{1,2}\s*일)?)?"
+    r"|\d{4}[.\-/]\s?\d{1,2}[.\-/]\s?\d{1,2}"
+    r"|제\s*\d+\s*(?:\(\s*[당전]\s*\)\s*)?기(?![가-힣])"
+    r"|\d+(?:\.\d+)?\s*(?:천원|백만원|억원|원)"
+)
+#: 판정 이름.
+TABLE_SAME = "전기와 같은 표"
+TEXT_SAME = "숫자가 든 문단이 전기와 같음"
+#: 기본 출력에서 보여 줄 문단 수.
+TEXT_SHOW = 40
+
+
+@dataclass(frozen=True)
+class SameTable:
+    """금액이 든 표인데 전기 문서와 한 칸도 다르지 않다 — 갱신을 빠뜨렸을 수 있다."""
+
+    sheet: str
+    table: str
+    row: int
+    label: str
+    cells: int
+
+    def line_ko(self) -> str:
+        where = f"{self.sheet} {self.row}행" if self.row else f"{self.sheet} 표 {self.table}"
+        return f"[{TABLE_SAME}] {where} — 첫 행 '{self.label[:24]}', 금액 칸 {self.cells}개가 전기 문서 그대로입니다"
+
+    def as_dict(self) -> dict:
+        return {"sheet": self.sheet, "table": self.table, "row": self.row, "label": self.label,
+                "cells": self.cells}
+
+
+@dataclass(frozen=True)
+class SameText:
+    """금액·날짜가 든 서술 문단인데 전기 문서와 글자가 같다."""
+
+    sheet: str
+    row: int
+    eid: str
+    clues: tuple
+    snippet: str
+
+    def line_ko(self) -> str:
+        where = f"{self.sheet} {self.row}행" if self.row else f"{self.sheet} {self.eid}"
+        return (f"[{TEXT_SAME}] {where} — {', '.join(self.clues[:6])}"
+                + (f" 외 {len(self.clues) - 6}개" if len(self.clues) > 6 else "")
+                + f" | {self.snippet}")
+
+    def as_dict(self) -> dict:
+        return {"sheet": self.sheet, "row": self.row, "id": self.eid, "clues": list(self.clues),
+                "snippet": self.snippet}
+
+
 @dataclass
 class DiffReport:
     old: DocMap
@@ -176,6 +233,9 @@ class DiffReport:
     gaps: list = field(default_factory=list)
     carries: list = field(default_factory=list)
     stale: list = field(default_factory=list)
+    #: 0.4.0 — 금액이 든 표인데 전기 문서와 완전히 같은 것 / 숫자가 든 문단인데 글자가 같은 것.
+    same_tables: list = field(default_factory=list)
+    same_texts: list = field(default_factory=list)
     #: 짝을 짓지 못한 시트·표 `[(사유, 설명)]`.
     structure: list = field(default_factory=list)
     matched_rows: int = 0
@@ -203,6 +263,9 @@ class DiffReport:
                 f"이월: {CARRY_OK} {c[CARRY_OK]} / {CARRY_BAD} {c[CARRY_BAD]} / "
                 f"{CARRY_EMPTY} {c[CARRY_EMPTY]} / {PERIOD_STALE} {len(self.stale)}"
             )
+            if self.same_tables or self.same_texts:
+                out.append(f"확인 필요: {TABLE_SAME} {len(self.same_tables)} / "
+                           f"{TEXT_SAME} {len(self.same_texts)}")
         return out
 
     def lines_ko(self, verbose: bool = False) -> list:
@@ -240,6 +303,17 @@ class DiffReport:
                 lines.append(f"── {PERIOD_STALE} {len(self.stale)}건 ──")
                 lines.extend(p.line_ko() for p in self.stale)
                 lines.append("")
+            if self.same_tables:
+                lines.append(f"── {TABLE_SAME} {len(self.same_tables)}건 (갱신 누락 확인) ──")
+                lines.extend(t.line_ko() for t in self.same_tables)
+                lines.append("")
+            if self.same_texts:
+                lines.append(f"── {TEXT_SAME} {len(self.same_texts)}건 (금액·날짜 확인) ──")
+                shown = self.same_texts if verbose else self.same_texts[:TEXT_SHOW]
+                lines.extend(t.line_ko() for t in shown)
+                if len(shown) < len(self.same_texts):
+                    lines.append(f"… 그 밖 {len(self.same_texts) - len(shown)}건 (-v 로 전부 봅니다)")
+                lines.append("")
             if verbose:
                 ok = [c for c in self.carries if c.verdict == CARRY_OK]
                 if ok:
@@ -264,6 +338,8 @@ class DiffReport:
                 "counts": self.carry_counts(),
                 "items": [c.as_dict() for c in self.carries],
                 "period_stale": [p.as_dict() for p in self.stale],
+                "same_tables": [t.as_dict() for t in self.same_tables],
+                "same_texts": [t.as_dict() for t in self.same_texts],
             }
         return obj
 
@@ -414,10 +490,13 @@ def diff(old_path, new_path, *, rollforward: bool = False) -> DiffReport:
     for os_, ns in zip(old.sheets[:n], new.sheets[:n]):
         if os_.name != ns.name:
             report.structure.append(f"시트 이름이 다릅니다 — 전: {os_.name} / 후: {ns.name}")
+        if rollforward and same_doc:
+            _same_text_check(os_, ns, report)
         for ot, nt in _pair_tables(os_, ns, report):
             pairs, only_old, only_new = (
                 _pair_rows_by_id(ot, nt) if same_doc else _pair_rows_by_label(ot, nt)
             )
+            touched_before = len(report.changes) + len(report.gaps)
             report.matched_rows += len(pairs)
             for r in only_old:
                 report.gaps.append(RowGap(nt.sheet, nt.eid, "삭제", r.excel_row, r.eid, r.label))
@@ -442,7 +521,29 @@ def diff(old_path, new_path, *, rollforward: bool = False) -> DiffReport:
             if rollforward:
                 for oh, nh in zip(ot.headers, nt.headers):
                     _check_period_cells(ot, nt, oh, nh, report)
+                if same_doc and pairs and len(report.changes) + len(report.gaps) == touched_before:
+                    amounts = sum(len(r.vals) for r in nt.rows)
+                    if amounts and any(v != 0 for r in nt.rows for v in r.vals.values()):
+                        first = next((r for r in nt.rows if r.label), nt.rows[0])
+                        report.same_tables.append(SameTable(
+                            nt.sheet, nt.eid, nt.start_row or first.excel_row, first.label, amounts))
     return report
+
+
+def _same_text_check(old_sheet, new_sheet, report: DiffReport) -> None:
+    """같은 문서의 두 판에서, 금액·날짜가 든 서술 문단이 글자 그대로면 확인 목록에 올린다 (0.4.0)."""
+    old_by_id = {b.eid: b for b in old_sheet.blocks if b.eid}
+    for b in new_sheet.blocks:
+        ob = old_by_id.get(b.eid)
+        if ob is None:
+            continue
+        text = " ".join(str(b.text or "").split())
+        if not text or text != " ".join(str(ob.text or "").split()):
+            continue
+        clues = tuple(dict.fromkeys(m.group(0).strip() for m in RE_NUMBER_CLUE.finditer(text)))
+        if not clues:
+            continue
+        report.same_texts.append(SameText(new_sheet.name, b.excel_row, b.eid, clues, text[:60]))
 
 
 __all__ = [
@@ -457,5 +558,9 @@ __all__ = [
     "CarryItem",
     "PeriodItem",
     "DiffReport",
+    "SameTable",
+    "SameText",
+    "TABLE_SAME",
+    "TEXT_SAME",
     "diff",
 ]

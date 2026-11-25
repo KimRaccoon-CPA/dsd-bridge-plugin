@@ -47,6 +47,7 @@ from .rowedit import RowPlan, clone_p_bytes, clone_tr_bytes, delete_span, insert
 from .sheetstate import FIRST_VALUE_COL, WorkbookState, load_workbook_state
 from .text import (
     canonical_out,
+    classify,
     count_bare_amp,
     cr_to_lf,
     escape_text,
@@ -85,6 +86,8 @@ MIXED_EDIT_ERROR = (
 #: 0.3.0 — 글을 고쳐 날짜 속성값(AUNITVALUE)을 따라 바꾸는 칸의 AUNIT 값.
 DATE_AUNITS = frozenset({"PERIODFROM", "PERIODTO", "PERIODFROM2", "PERIODTO2",
                          "SUB_PERIODFROM", "SUB_PERIODTO", "COMM_DATE"})
+#: 이 값 이상이면 Excel 직접 입력에서 끝자리가 잘릴 수 있다 (유효숫자 15자리).
+BIG_NUMBER = 10 ** 15
 #: 표준계정코드에 없는 신설 계정 코드 (DART 편집기 관행).
 NEW_ACCOUNT_CODE = "99999999999999"
 
@@ -401,6 +404,8 @@ def _diff_and_patch(state: WorkbookState, model: DocModel, baseline: dict, plan:
     mixed_edits = []
     mixed_done = []
     date_changes = []
+    big_numbers = []
+    text_in_number = []
 
     def apply_mixed(ordinal: int, new_text: str, ch: CellChange) -> bool:
         """0.3.0 — 서식 조각을 그대로 두고 바뀐 글자만 바꾼다. 못 하면 False (예전처럼 거부·평문화)."""
@@ -469,6 +474,14 @@ def _diff_and_patch(state: WorkbookState, model: DocModel, baseline: dict, plan:
                 ch = CellChange(sheet_name, r.row, _excel_col(r.col_of(i)), cid, mc.ordinal, mc.text, "",
                                 "cell", mixed=mc.mixed, table_id=r.table)
                 new_text = _new_text_for_cell(mc, table_of_cell[cid], excel_val, ch)
+                where_cell = f"{sheet_name} {r.row}행 {ch.col}열"
+                if _is_number(excel_val) and abs(Decimal(str(excel_val))) >= BIG_NUMBER:
+                    big_numbers.append(where_cell)
+                elif isinstance(excel_val, str) and mc.numeric:
+                    k = classify(excel_val.strip())
+                    if k.cls not in ("empty", "dash", "ws"):
+                        text_in_number.append(f"{where_cell} '{excel_val.strip()[:16]}'"
+                                              + ("(글자로 입력된 숫자)" if k.numeric else ""))
                 ch.new = new_text
                 ch.whitespace_only = _whitespace_only(canonical_out(mc.display), cur)
                 if mc.mixed:
@@ -522,6 +535,18 @@ def _diff_and_patch(state: WorkbookState, model: DocModel, baseline: dict, plan:
         report.notices.append(
             f"안내: 서식 조각(SPAN)이 섞인 회색 칸·문단 {len(mixed_done)}곳은 서식을 그대로 두고 바뀐 글자만 "
             f"반영했습니다({where}{more}).{tail}"
+        )
+    if big_numbers:
+        report.warnings.append(
+            f"경고: 15자리가 넘는 숫자가 {len(big_numbers)}곳에 들어갔습니다({', '.join(big_numbers[:6])}). "
+            "Excel 은 직접 입력한 숫자를 15자리까지만 보존하므로 끝자리가 0 으로 바뀌지 않았는지 확인하세요."
+        )
+    if text_in_number:
+        more = f" 외 {len(text_in_number) - 6}곳" if len(text_in_number) > 6 else ""
+        report.warnings.append(
+            f"경고: 원래 숫자였던 칸 {len(text_in_number)}곳에 글자가 들어갔습니다"
+            f"({', '.join(text_in_number[:6])}{more}). 숫자라면 숫자 형식으로 입력해야 콤마·괄호 표기가 "
+            "맞춰지고 합계검증 대상이 됩니다."
         )
     if date_changes:
         report.notices.append(

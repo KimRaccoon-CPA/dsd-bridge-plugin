@@ -73,6 +73,15 @@ LABEL_MISSING = "라벨 미발견"
 UNRECONCILED = "미대사"
 VERDICTS = (MATCHED, AMOUNT_MISMATCH, TYPO, LABEL_MISSING, UNRECONCILED)
 
+#: 0.4.0 역방향 대사 — 보고서 어느 행과도 짝지어지지 않은 정산표 행.
+ONLY_SETTLEMENT = "정산표에만 있음"
+#: 기본 출력에서 보여 줄 `정산표에만 있음` 행 수.
+ONLY_SHOW = 40
+#: 당기·전기 열 뒤바뀜을 판정하려면 그 시트에서 열 역할을 정한 행이 이만큼은 있어야 한다.
+SWAP_MIN_VOTES = 4
+#: Excel 오류값.
+EXCEL_ERRORS = ("#REF!", "#VALUE!", "#N/A", "#DIV/0!", "#NAME?", "#NUM!", "#NULL!")
+
 #: 오타로 의심할 라벨 유사도 하한.
 TYPO_RATIO = 0.6
 #: 부분 일치(포함 관계)로 후보를 넓힐 때 요구하는 최소 라벨 길이.
@@ -303,9 +312,80 @@ def load_settlement(path, mapping: dict | None = None, notes: list | None = None
             for n in picked:
                 rows.extend(rows_of(n))
             out[kind] = rows
+            if picked and not rows and notes is not None:
+                msg = _uncached_note(p, picked)
+                if msg not in notes:
+                    notes.append(msg)
+        if notes is not None:
+            notes.extend(_sanity_notes(wb, sorted({r.sheet for k in out for r in out[k]})))
         return out
     finally:
         wb.close()
+
+
+def _sanity_notes(wb, picked: list) -> list:
+    """정산표가 검토 전 상태일 단서 (0.4.0) — 대사에 쓴 시트의 오류값, 통합문서 전체의 FALSE 검증 셀."""
+    out = []
+    errors = []
+    for name in picked:
+        for row in wb[name].iter_rows():
+            for c in row:
+                if isinstance(c.value, str) and c.value.strip() in EXCEL_ERRORS:
+                    errors.append(f"{name}!{c.coordinate}")
+    if errors:
+        more = f" 외 {len(errors) - 8}곳" if len(errors) > 8 else ""
+        out.append(f"정산표의 대사 대상 시트에 오류값(#REF! 등)이 {len(errors)}곳 있습니다: "
+                   f"{', '.join(errors[:8])}{more}. 정산표를 먼저 고치세요.")
+    falses = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for c in row:
+                if c.value is False:
+                    falses.append(f"{ws.title}!{c.coordinate}")
+    if falses:
+        more = f" 외 {len(falses) - 8}곳" if len(falses) > 8 else ""
+        out.append(f"정산표에 FALSE 인 칸이 {len(falses)}곳 있습니다: {', '.join(falses[:8])}{more}. "
+                   "검증 셀이라면 검토가 끝나지 않은 정산표일 수 있습니다.")
+    return out
+
+
+def _uncached_note(path, picked: list) -> str:
+    """시트는 찾았는데 금액 행이 하나도 없을 때 — 수식 계산값이 저장되지 않은 통합문서인지 본다."""
+    from openpyxl import load_workbook
+
+    try:
+        wb = load_workbook(path, data_only=False, read_only=True)
+        try:
+            formulas = sum(1 for n in picked for row in wb[n].iter_rows(max_row=200)
+                           for c in row if isinstance(c.value, str) and c.value.startswith("="))
+        finally:
+            wb.close()
+    except Exception:                       # pragma: no cover - 진단용이라 실패해도 대사는 계속
+        formulas = 0
+    if formulas:
+        return (f"정산표 시트({', '.join(picked[:4])})에서 금액을 읽지 못했습니다. 수식 {formulas}개의 계산값이 "
+                "파일에 저장돼 있지 않습니다. Excel 에서 열어 다시 계산한 뒤 저장하세요.")
+    return (f"정산표 시트({', '.join(picked[:4])})에서 계정과목과 금액이 함께 있는 행을 찾지 못했습니다. "
+            "--settlement-map 의 label_cols/value_cols 를 확인하세요.")
+
+
+def _now_text() -> str:
+    import datetime as _dt
+
+    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _file_stamp(path) -> tuple:
+    import datetime as _dt
+    import hashlib
+
+    p = Path(path)
+    try:
+        sha = hashlib.sha256(p.read_bytes()).hexdigest()
+        mtime = _dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except OSError:                         # pragma: no cover
+        return "", ""
+    return sha, mtime
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,6 +405,8 @@ class RepRow:
     label: str
     norm: str
     amounts: tuple              # Decimal 목록 (`-`·빈칸은 뺀다)
+    cur: object = None          # 0.4.0 표준 재무제표 표의 당기 금액 (아니면 None)
+    prior: object = None        # 0.4.0 표준 재무제표 표의 전기 금액
 
 
 def report_rows(doc: DocMap) -> list:
@@ -356,8 +438,11 @@ def report_rows(doc: DocMap) -> list:
                         continue
                 if not kind or not r.label:
                     continue
+                cur = prior = None
+                if item.is_period:
+                    cur, prior = r.amount(0), r.amount(1)
                 out.append(RepRow(kind, sheet.name, item.eid, r.excel_row, r.eid,
-                                  r.label, norm_label(r.label), amounts))
+                                  r.label, norm_label(r.label), amounts, cur, prior))
     return out
 
 
@@ -385,6 +470,7 @@ class Result:
     missing: tuple = ()
     suggestion: str = ""        # `오타 의심` 일 때 가장 비슷한 정산표 계정과목
     ratio: float = 0.0
+    caution: str = ""           # 0.4.0 판정은 그대로 두고 덧붙이는 주의 (사람이 볼 것)
 
     def line_ko(self) -> str:
         amts = ", ".join(format_number(a, DEFAULT_PATTERN) for a in self.rep.amounts)
@@ -396,6 +482,8 @@ class Result:
         if self.missing:
             line += " | 정산표에 없는 금액: " + ", ".join(
                 format_number(m, DEFAULT_PATTERN) for m in self.missing)
+        if self.caution:
+            line += f" | 주의: {self.caution}"
         return line
 
     def as_dict(self) -> dict:
@@ -407,6 +495,7 @@ class Result:
             "settlement_amounts": self.js_amounts,
             "missing": [str(m) for m in self.missing],
             "suggestion": self.suggestion, "ratio": round(self.ratio, 3),
+            "caution": self.caution,
         }
 
 
@@ -456,6 +545,20 @@ class SettlementReport:
     results: list = field(default_factory=list)
     #: 정산표에서 쓸 행을 못 찾은 구분 `[(구분, 사유)]`.
     notes: list = field(default_factory=list)
+    #: 0.4.0 역방향 대사 — 보고서 어느 행과도 짝지어지지 않은 정산표 행 `[(JsRow, 대사 범위 안인가)]`.
+    only_settlement: list = field(default_factory=list)
+    #: 0.4.0 정산표 파일 지문 (대사 뒤에 정산표가 바뀌었는지 견줄 수 있게).
+    settlement_sha256: str = ""
+    settlement_mtime: str = ""
+
+    @property
+    def cautions(self) -> list:
+        return [r for r in self.results if r.caution]
+
+    @property
+    def only_inside(self) -> list:
+        """대사 범위 안(짝지어진 행들 사이)에 낀 정산표 전용 행 — 보고서에 빠진 계정일 가능성이 높다."""
+        return [j for j, inside in self.only_settlement if inside]
 
     def counts(self, kinds=None) -> dict:
         out = {v: 0 for v in VERDICTS}
@@ -475,17 +578,38 @@ class SettlementReport:
                     f"{TYPO} {c[TYPO]} / {LABEL_MISSING} {c[LABEL_MISSING]} / "
                     f"{UNRECONCILED} {c[UNRECONCILED]}")
 
-        return [line("재무제표", {"BS", "IS", "CE", "CF"}), line("주석", {FN})]
+        out = [line("재무제표", {"BS", "IS", "CE", "CF"}), line("주석", {FN})]
+        extra = []
+        if self.cautions:
+            extra.append(f"주의 {len(self.cautions)}")
+        if self.only_settlement:
+            outside = len(self.only_settlement) - len(self.only_inside)
+            extra.append(f"{ONLY_SETTLEMENT} {len(self.only_inside)}"
+                         + (f" (대사 범위 밖 {outside})" if outside else ""))
+        if extra:
+            out.append("확인 필요: " + " / ".join(extra))
+        return out
 
     def lines_ko(self, verbose: bool = False) -> list:
         lines = [f"── 정산표 상호대사 ({self.settlement_path.name}) ──"]
         lines.extend(f"안내: {n}" for n in self.notes)
         for r in self.results:
-            if r.verdict == MATCHED and not verbose:
+            if r.verdict == MATCHED and not verbose and not r.caution:
                 continue
             if r.verdict == UNRECONCILED and not verbose:
                 continue
             lines.append(r.line_ko())
+        inside = self.only_inside
+        if inside:
+            lines.append(f"── {ONLY_SETTLEMENT} {len(inside)}건 (보고서에 행이 빠졌는지 확인) ──")
+            shown = inside if verbose else inside[:ONLY_SHOW]
+            lines.extend(f"[{ONLY_SETTLEMENT}] {j.sheet}!{j.row}행 {j.label[:40]} | {j.amounts_ko()}"
+                         for j in shown)
+            if len(shown) < len(inside):
+                lines.append(f"… 그 밖 {len(inside) - len(shown)}건 (-v 또는 --report 로 전부 봅니다)")
+        if verbose:
+            lines.extend(f"[{ONLY_SETTLEMENT}·범위 밖] {j.sheet}!{j.row}행 {j.label[:40]} | {j.amounts_ko()}"
+                         for j, ins in self.only_settlement if not ins)
         lines.extend(self.summary_ko())
         return lines
 
@@ -497,6 +621,13 @@ class SettlementReport:
                        "주석": self.counts({FN})},
             "notes": list(self.notes),
             "items": [r.as_dict() for r in self.results],
+            "only_settlement": [
+                {"sheet": j.sheet, "row": j.row, "label": j.label, "amounts": j.amounts_ko(),
+                 "inside": inside}
+                for j, inside in self.only_settlement
+            ],
+            "settlement_sha256": self.settlement_sha256,
+            "settlement_mtime": self.settlement_mtime,
         }
 
     def write_json(self, path) -> None:
@@ -516,7 +647,7 @@ class SettlementReport:
         fills = {MATCHED: "C6EFCE", AMOUNT_MISMATCH: "FFC7CE", TYPO: "FFEB9C",
                  LABEL_MISSING: "FFC7CE", UNRECONCILED: "D9D9D9"}
         header = ["구분", "시트", "행", "보고서 계정과목", "보고서 금액", "판정",
-                  "정산표 위치", "정산표 금액", "정산표에 없는 금액", "비슷한 계정과목"]
+                  "정산표 위치", "정산표 금액", "정산표에 없는 금액", "비슷한 계정과목", "주의"]
         wb = Workbook()
         ws = wb.active
         ws.title = "재무제표"
@@ -534,10 +665,29 @@ class SettlementReport:
                 r.verdict, r.where, r.js_amounts,
                 ", ".join(format_number(m, DEFAULT_PATTERN) for m in r.missing),
                 f"{r.suggestion} ({r.ratio:.2f})" if r.suggestion else "",
+                r.caution,
             ])
             fill = fills.get(r.verdict)
             if fill:
                 target.cell(target.max_row, 6).fill = PatternFill("solid", fgColor=fill)
+            if r.caution:
+                target.cell(target.max_row, 11).fill = PatternFill("solid", fgColor="FFEB9C")
+        ws3 = wb.create_sheet(ONLY_SETTLEMENT)
+        ws3.append(["정산표 시트", "행", "계정과목", "금액", "대사 범위"])
+        for c in ws3[1]:
+            c.font = Font(bold=True)
+        ws3.freeze_panes = "A2"
+        for j, inside in self.only_settlement:
+            ws3.append([j.sheet, j.row, j.label, j.amounts_ko(), "안(확인)" if inside else "밖(참고)"])
+            if inside:
+                ws3.cell(ws3.max_row, 5).fill = PatternFill("solid", fgColor="FFEB9C")
+        ws4 = wb.create_sheet("정보")
+        for row in (["보고서", self.report_path.name], ["정산표", self.settlement_path.name],
+                    ["정산표 수정 시각", self.settlement_mtime], ["정산표 sha256", self.settlement_sha256],
+                    ["대사 시각", _now_text()]):
+            ws4.append(row)
+        for n in self.notes:
+            ws4.append(["안내", n])
         p = Path(path)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -546,11 +696,37 @@ class SettlementReport:
             raise OutputError(f"오류: 대사 결과를 쓸 수 없습니다: {p}\n  사유: {exc}") from exc
 
 
+def _col_of(coord: str) -> str:
+    return "".join(ch for ch in coord if ch.isalpha())
+
+
+def _near_hint(missing, js: JsRow) -> str:
+    """금액 불일치의 단서 — 부호만 다르거나 1~2 차이(단수차)인 금액이 정산표 행에 있는가."""
+    vals = [v for _, v in js.values]
+    hints = []
+    for m in missing:
+        if m and any(amount_match(-m, v) for v in vals):
+            hints.append(f"{format_number(m, DEFAULT_PATTERN)}: 부호만 다른 금액이 있습니다")
+            continue
+        near = [v for v in vals for w in (v, v / 1000, v * 1000)
+                if 0 < abs(w - m) <= 2]
+        if near:
+            hints.append(f"{format_number(m, DEFAULT_PATTERN)}: 1~2 차이 나는 금액이 있습니다(단수차 확인)")
+    return "; ".join(hints)
+
+
 def crosscheck(doc: DocMap, settlement_path, mapping: dict | None = None) -> SettlementReport:
-    """구조 지도와 정산표를 상호대사한다."""
+    """구조 지도와 정산표를 상호대사한다.
+
+    0.4.0 부터 판정(`일치` 등)과 별개로 **주의**를 붙인다 — 금액만으로 짝지었는데 같은 금액의 정산표 행이
+    여럿인 경우, 정산표 행 하나를 보고서 행 둘이 쓴 경우, 당기·전기 금액이 정산표의 반대 열에 있는 경우,
+    불일치인데 부호만 다르거나 단수차인 경우. 그리고 보고서 어느 행과도 짝지어지지 않은 정산표 행을
+    `정산표에만 있음` 으로 모은다(역방향 대사). 주의·역방향 결과는 종료 코드를 바꾸지 않는다.
+    """
     picked_notes: list = []
     js = load_settlement(settlement_path, mapping, notes=picked_notes)
     report = SettlementReport(doc.path, Path(settlement_path))
+    report.settlement_sha256, report.settlement_mtime = _file_stamp(settlement_path)
     report.notes.extend(picked_notes)
     reps = report_rows(doc)
     for kind in sorted({r.kind for r in reps}):
@@ -560,6 +736,8 @@ def crosscheck(doc: DocMap, settlement_path, mapping: dict | None = None) -> Set
                 f"--settlement-map 으로 시트를 지정할 수 있습니다."
             )
     pointer: dict = {}
+    used: dict = {}            # (정산표 시트, 행) → [결과 인덱스]
+    matched_rows: dict = {}    # 결과 인덱스 → JsRow
     for rep in reps:
         rows = js.get(rep.kind) or []
         if not rep.amounts:
@@ -592,17 +770,112 @@ def crosscheck(doc: DocMap, settlement_path, mapping: dict | None = None) -> Set
         pointer[rep.kind] = idx + 1
         verdict = MATCHED if not missing else AMOUNT_MISMATCH
         where = f"{best_row.sheet}!{best_row.row}행 ({best_row.label[:24]})"
+        cautions = []
         if by_amount:
             where = "금액 대사 " + where
+            others = len({(j.sheet, j.row) for _, j in cands}) - 1
+            if others > 0:
+                cautions.append(f"계정과목이 달라 금액으로 짝지었는데 같은 금액의 정산표 행이 {others}개 더 "
+                                "있습니다(짝이 맞는지 확인)")
+        if missing:
+            hint = _near_hint(missing, best_row)
+            if hint:
+                cautions.append(hint)
+        k = len(report.results)
         report.results.append(Result(
             rep, verdict, where=where, js_amounts=best_row.amounts_ko(), missing=missing,
+            caution="; ".join(cautions),
         ))
+        used.setdefault((best_row.sheet, best_row.row), []).append(k)
+        matched_rows[k] = best_row
+
+    def add_caution(k: int, text: str) -> None:
+        r = report.results[k]
+        merged = f"{r.caution}; {text}" if r.caution else text
+        report.results[k] = Result(r.rep, r.verdict, r.where, r.js_amounts, r.missing,
+                                   r.suggestion, r.ratio, merged)
+
+    # 정산표 행 하나를 같은 표의 보고서 행 둘 이상이 쓴 경우 — 보고서에 같은 줄이 두 번 들어갔을 수 있다.
+    for (sheet, row), ks in used.items():
+        by_table: dict = {}
+        for k in ks:
+            r = report.results[k]
+            if r.verdict == MATCHED:
+                by_table.setdefault((r.rep.sheet, r.rep.table), []).append(k)
+        for group in by_table.values():
+            if len(group) > 1:
+                for k in group:
+                    add_caution(k, f"정산표 {sheet}!{row}행을 이 표의 보고서 행 {len(group)}개가 함께 "
+                                   "씁니다(중복 행인지 확인)")
+
+    _swap_cautions(report, matched_rows, add_caution)
+
+    # 역방향 대사 — 한 번도 쓰이지 않은 정산표 행. 같은 시트가 여러 구분에 쓰이므로 (시트, 행)으로 센다.
+    seen = set()
+    span: dict = {}
+    for (sheet, row) in used:
+        lo, hi = span.get(sheet, (row, row))
+        span[sheet] = (min(lo, row), max(hi, row))
+    for kind in js:
+        for j in js[kind]:
+            key = (j.sheet, j.row)
+            if key in used or key in seen:
+                continue
+            seen.add(key)
+            vals = [v for _, v in j.values]
+            if not any(v != 0 for v in vals):
+                continue
+            if all(v == v.to_integral_value() and 1900 <= v <= 2100 for v in vals):
+                continue                    # 연도만 든 머리글 행
+            lo, hi = span.get(j.sheet, (0, -1))
+            report.only_settlement.append((j, lo < j.row < hi))
+    report.only_settlement.sort(key=lambda t: (not t[1], t[0].sheet, t[0].row))
+
     n = sum(1 for r in report.results if r.where.startswith("금액 대사"))
     if n:
         report.notes.append(
             f"계정과목 표기가 달라 금액으로 대사한 행이 {n}개 있습니다 (-v 로 봅니다)."
         )
     return report
+
+
+def _swap_cautions(report: SettlementReport, matched_rows: dict, add_caution) -> None:
+    """당기·전기 금액이 정산표의 반대 열에 있는 행을 찾는다 (0.4.0).
+
+    `일치` 판정은 "보고서 금액이 정산표 행 어딘가에 있다" 만 보므로, 당기와 전기를 바꿔 적어도 통과한다.
+    정산표 시트마다 "당기 금액이 주로 나오는 열" 과 "전기 금액이 주로 나오는 열" 을 다수결로 정한 뒤,
+    그 반대로 놓인 행에 주의를 붙인다.
+    """
+    votes: dict = {}           # 시트 → 열 → [당기로 맞은 횟수, 전기로 맞은 횟수]
+    facts = []
+    for k, js in matched_rows.items():
+        r = report.results[k]
+        cur, prior = r.rep.cur, r.rep.prior
+        if r.verdict != MATCHED or cur is None or prior is None or cur == prior or not cur or not prior:
+            continue
+        cur_cols = {_col_of(c) for c, v in js.values if amount_match(cur, v)}
+        prior_cols = {_col_of(c) for c, v in js.values if amount_match(prior, v)}
+        if not cur_cols or not prior_cols:
+            continue
+        facts.append((k, js.sheet, cur_cols, prior_cols))
+        tally = votes.setdefault(js.sheet, {})
+        for c in cur_cols - prior_cols:
+            tally.setdefault(c, [0, 0])[0] += 1
+        for c in prior_cols - cur_cols:
+            tally.setdefault(c, [0, 0])[1] += 1
+    role: dict = {}
+    for sheet, tally in votes.items():
+        for col, (a, b) in tally.items():
+            if a >= 3 * max(b, 1) and a >= SWAP_MIN_VOTES:
+                role[(sheet, col)] = "cur"
+            elif b >= 3 * max(a, 1) and b >= SWAP_MIN_VOTES:
+                role[(sheet, col)] = "prior"
+    for k, sheet, cur_cols, prior_cols in facts:
+        cur_roles = {role.get((sheet, c)) for c in cur_cols}
+        prior_roles = {role.get((sheet, c)) for c in prior_cols}
+        if ("prior" in cur_roles and "cur" not in cur_roles
+                and "cur" in prior_roles and "prior" not in prior_roles):
+            add_caution(k, "당기·전기 금액이 정산표와 반대 열에 있습니다(당기와 전기가 바뀌었는지 확인)")
 
 
 def load_mapping(path) -> dict:
@@ -640,6 +913,7 @@ __all__ = [
     "report_amount",
     "amount_match",
     "read_settlement_sheet",
+    "ONLY_SETTLEMENT",
     "load_settlement",
     "note_sheets",
     "report_rows",

@@ -767,6 +767,8 @@ class CheckReport:
     #: 정산표 상호대사 결과 (`--settlement`, 1.3). `None` 이면 하지 않았다는 뜻이다.
     #: 금액 불일치가 있으면 합계검증과 마찬가지로 종료 코드 8 이다.
     settlement: object = None
+    #: 확인 필요 문장 (0.4.0, `dsd_bridge.review`). 자동 판정이 아니며 종료 코드에 영향이 없다.
+    review: list = field(default_factory=list)
 
     def counts(self) -> dict:
         out = {v: 0 for v in VERDICTS}
@@ -832,6 +834,10 @@ class CheckReport:
         if self.settlement is not None:
             lines.append("")
             lines.extend(self.settlement.lines_ko(verbose))
+        if self.review:
+            lines.append("")
+            lines.append(f"── 확인 필요 {len(self.review)}건 (자동 판정 아님) ──")
+            lines.extend(f"확인: {r}" for r in self.review)
         return lines
 
     def json_obj(self):
@@ -845,6 +851,8 @@ class CheckReport:
         if self.xref is None and self.settlement is None:
             return items
         obj = {"items": items}
+        if self.review:
+            obj["review"] = list(self.review)
         if self.xref is not None:
             obj["xref"] = self.xref.json_obj()
         if self.settlement is not None:
@@ -912,6 +920,13 @@ def check(path, tolerance: int = DEFAULT_TOLERANCE, *, xref: bool = False,
             f"오류: 합계검증은 .dsd 또는 .xlsx 만 받습니다: {p}"
         )
     report = check_tables(tables, p, tolerance)
+    try:
+        from .docmap import load as load_map
+        from .review import review
+
+        report.review = review(load_map(p))
+    except Exception:                       # pragma: no cover - 검토 목록은 덤이라 실패해도 합계검증은 낸다
+        report.review = []
     if xref:
         from .xref import build as build_xref
 
